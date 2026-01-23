@@ -8,7 +8,7 @@ from tqdm import tqdm
 import wandb
 
 MODEL_NAME = "Qwen/Qwen3-0.6B" 
-BATCH_SIZE = 16 
+BATCH_SIZE = 128
 LR = 5e-5 
 EPOCHS = 1 
 MAX_LENGTH = 1024
@@ -17,7 +17,7 @@ DEVICE = torch.device("cuda") if torch.cuda.is_available() else "cpu"
 
 def main():
     wandb.init(project="qwen3guard-repro", config={"lr": LR, "epochs": EPOCHS, "batch_size": BATCH_SIZE})
-
+    torch.set_float32_matmul_precision('high')
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 
     if tokenizer.pad_token is None:
@@ -26,6 +26,7 @@ def main():
     model = StreamGuardModel(MODEL_NAME)
     model.backbone.to(DTYPE)
     model.to(DEVICE)
+    model = torch.compile(model)
 
     ds_rtp = load_dataset("allenai/real-toxicity-prompts", split="train")
 
@@ -40,16 +41,15 @@ def main():
         batch_size=BATCH_SIZE,
         shuffle=True,
         collate_fn=Collator(tokenizer, MAX_LENGTH),
-        num_workers=4,
-        pin_memory=True
+        num_workers=8,      
+        pin_memory=True,
+        persistent_workers=True  
     )
 
     optimizer = AdamW([
         {'params': model.head_q.parameters()}, 
         {'params': model.head_r.parameters()}
     ], lr=LR)
-    
-    scaler = torch.amp.GradScaler('cuda')
 
     model.train()
     
@@ -64,14 +64,13 @@ def main():
             labels_q = batch['labels_q'].to(DEVICE, non_blocking=True)
             labels_r = batch['labels_r'].to(DEVICE, non_blocking=True)
 
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
             with torch.amp.autocast('cuda', dtype=DTYPE):
-                _, _, loss = model(input_ids, attention_mask, labels_q, labels_r, sep_indices)
+                    _, _, loss = model(input_ids, attention_mask, labels_q, labels_r, sep_indices)
             
             if loss is not None:
-                scaler.scale(loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
+                loss.backward() 
+                optimizer.step()
                 wandb.log({"loss": loss.item()})
                 progress_bar.set_postfix({"loss": f"{loss.item():.4f}"})
             

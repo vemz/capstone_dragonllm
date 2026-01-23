@@ -1,0 +1,64 @@
+_wandb:
+    value:
+        cli_version: 0.24.0
+        e:
+            lf5oey5ldjag0fe1cl5hh8ue1y9jqdxp:
+                codePath: reproduction_model/train.py
+                codePathLocal: train.py
+                cpu_count: 8
+                cpu_count_logical: 16
+                cudaVersion: "12.4"
+                disk:
+                    /:
+                        total: "580478078976"
+                        used: "51153518592"
+                email: maxence.debes@polytechnique.edu
+                executable: /home/zeus/miniconda3/envs/cloudspace/bin/python
+                git:
+                    commit: 69b4aaf652aa7941c5a192f5c3dc7cd1233939f7
+                    remote: https://github.com/vemz/capstone_dragonllm
+                gpu: NVIDIA L40S
+                gpu_count: 1
+                gpu_nvidia:
+                    - architecture: Ada
+                      cudaCores: 18176
+                      memoryTotal: "48305799168"
+                      name: NVIDIA L40S
+                      uuid: GPU-6942b0d3-361a-74be-1374-a86ad7775f4a
+                host: computeinstance-e00v6kwqtwg57hypc7
+                memory:
+                    total: "67420618752"
+                os: Linux-5.15.0-164-generic-x86_64-with-glibc2.39
+                program: /teamspace/studios/this_studio/capstone_dragonllm/reproduction_model/train.py
+                python: CPython 3.12.11
+                root: /teamspace/studios/this_studio/capstone_dragonllm/reproduction_model
+                startedAt: "2026-01-23T17:23:52.321909Z"
+                writerId: lf5oey5ldjag0fe1cl5hh8ue1y9jqdxp
+        m: []
+        python_version: 3.12.11
+        t:
+            "1":
+                - 1
+                - 11
+                - 49
+                - 51
+                - 71
+            "2":
+                - 1
+                - 11
+                - 49
+                - 51
+                - 71
+            "3":
+                - 16
+            "4": 3.12.11
+            "5": 0.24.0
+            "6": 4.57.6
+            "12": 0.24.0
+            "13": linux-x86_64
+batch_size:
+    value: 16
+epochs:
+    value: 1
+lr:
+    value: 5e-05
