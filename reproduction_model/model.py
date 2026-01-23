@@ -1,4 +1,6 @@
 from transformers import AutoModelForCausalLM, AutoTokenizer
+import torch
+import torch.nn as nn
 
 model_name = "Qwen/Qwen3-0.6B"
 
@@ -43,10 +45,7 @@ content = tokenizer.decode(output_ids[index:], skip_special_tokens=True).strip("
 print("thinking content:", thinking_content)
 print("content:", content)
 
-# dataset import
-
-from datasets import load_dataset
-ds = load_dataset("Qwen/Qwen3GuardTest")
+# streaming model
 
 class SafetyHead(nn.Module):
     def __init__(self, hidden_size, num_classes=2):
@@ -92,8 +91,7 @@ class StreamGuardModel(nn.Module):
         
         logits_q = self.head_q(h) 
         logits_r = self.head_r(h)
-        print(logits_r)
-        
+
         loss = None
         
         if labels_q is not None and labels_r is not None and sep_indices is not None:
@@ -112,3 +110,112 @@ class StreamGuardModel(nn.Module):
             loss = loss_q + loss_r
 
         return logits_q, logits_r, loss
+    
+# now we prepare the data
+
+def adapter_qwen3guard(example):
+
+    unsafe_type = example.get("unsafe_type", "")
+    is_unsafe = 1 if (unsafe_type and unsafe_type != "Safe") else 0
+
+    return {
+        "messages": example["message"], 
+        "label_q": is_unsafe, 
+        "label_r": is_unsafe
+    }
+
+def adapter_aegis(example):
+    l_q = 1 if example.get("prompt_label") == "Unsafe" else 0
+    l_r = 1 if example.get("response_label") == "Unsafe" else 0
+    
+    msgs = [
+        {"role": "user", "content": example["prompt"]},
+        {"role": "assistant", "content": example["response"]}
+    ]
+    
+    return {
+        "messages": msgs,
+        "label_q": l_q,
+        "label_r": l_r
+    }
+
+def adapter_rtp(example):
+    THRESHOLD = 0.5
+    
+    p_score = example["prompt"].get("toxicity") or 0.0
+    r_score = example["continuation"].get("toxicity") or 0.0
+    
+    msgs = [
+        {"role": "user", "content": example["prompt"]["text"]},
+        {"role": "assistant", "content": example["continuation"]["text"]}
+    ]
+    
+    return {
+        "messages": msgs,
+        "label_q": 1 if p_score > THRESHOLD else 0,
+        "label_r": 1 if r_score > THRESHOLD else 0
+    }
+
+class Collator:
+    def __init__(self, tokenizer, max_length=1024): 
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+
+    def __call__(self, batch):
+        input_ids_list = []
+        attention_mask_list = []
+        sep_indices_list = []
+        labels_q_list = []
+        labels_r_list = []
+
+        for item in batch:
+            messages = item['messages']
+            lbl_q = item['label_q']
+            lbl_r = item['label_r']
+
+            full_text = self.tokenizer.apply_chat_template(messages, tokenize=False)
+            
+            user_msg = [m for m in messages if m['role'] == 'user']
+            prompt_text = self.tokenizer.apply_chat_template(user_msg, tokenize=False, add_generation_prompt=True)
+            
+            encoding = self.tokenizer(
+                full_text,
+                max_length=self.max_length,
+                truncation=True,
+                padding="max_length",
+                return_tensors="pt"
+            )
+            
+            prompt_tokens = self.tokenizer(prompt_text, add_special_tokens=False).input_ids
+            sep_index = len(prompt_tokens) - 1
+
+            if sep_index >= self.max_length: 
+                sep_index = self.max_length - 2
+
+            input_ids = encoding.input_ids[0]
+            attention_mask = encoding.attention_mask[0]
+
+            labels_r_tensor = torch.full_like(input_ids, -100)
+            
+            seq_len = int(attention_mask.sum())
+            
+            if sep_index + 1 < seq_len:
+                labels_r_tensor[sep_index+1 : seq_len] = lbl_r
+
+            input_ids_list.append(input_ids)
+            attention_mask_list.append(attention_mask)
+            sep_indices_list.append(sep_index)
+            
+            labels_q_list.append(lbl_q)
+            labels_r_list.append(labels_r_tensor)
+
+        return {
+            "input_ids": torch.stack(input_ids_list),
+            "attention_mask": torch.stack(attention_mask_list),
+            "sep_indices": torch.tensor(sep_indices_list, dtype=torch.long),
+            "labels_q": torch.tensor(labels_q_list, dtype=torch.long),
+            "labels_r": torch.stack(labels_r_list)
+        }
