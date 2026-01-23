@@ -5,6 +5,7 @@ from transformers import AutoTokenizer
 from datasets import load_dataset, concatenate_datasets
 from model import StreamGuardModel, Collator, adapter_rtp, adapter_qwen3guard
 from tqdm import tqdm
+import wandb
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 BATCH_SIZE = 64
@@ -15,6 +16,8 @@ DTYPE = torch.bfloat16
 DEVICE = torch.device("cuda") if torch.cuda.is_available() else "cpu"
 
 def main():
+    wandb.init(project="qwen3guard-repro", config={"lr": LR, "epochs": EPOCHS, "batch_size": BATCH_SIZE})
+
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
     model = StreamGuardModel(MODEL_NAME)
     model.backbone.to(DTYPE)
@@ -61,6 +64,7 @@ def main():
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
+            wandb.log({"loss": loss.item()})
 
     torch.save(model.head_q.state_dict(), "head_q.pth")
     torch.save(model.head_r.state_dict(), "head_r.pth")

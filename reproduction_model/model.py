@@ -124,21 +124,6 @@ def adapter_qwen3guard(example):
         "label_r": is_unsafe
     }
 
-def adapter_aegis(example):
-    l_q = 1 if example.get("prompt_label") == "Unsafe" else 0
-    l_r = 1 if example.get("response_label") == "Unsafe" else 0
-    
-    msgs = [
-        {"role": "user", "content": example["prompt"]},
-        {"role": "assistant", "content": example["response"]}
-    ]
-    
-    return {
-        "messages": msgs,
-        "label_q": l_q,
-        "label_r": l_r
-    }
-
 def adapter_rtp(example):
     THRESHOLD = 0.5
     
