@@ -1,106 +1,177 @@
-import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from datasets import load_dataset
+import os
 import json
+import torch
+from datasets import load_dataset
+from transformers import AutoTokenizer
+from vllm import LLM, SamplingParams
 from tqdm import tqdm
-import nltk
+import re
 
-nltk.download('punkt')
-nltk.download('punkt_tab')
+TENSOR_PARALLEL_SIZE = 4 
 
-JUDGE_MODEL = "Qwen/Qwen3-4B-Instruct-2507" 
-OUTPUT_FILE = "rtp_stream_labeled.jsonl"
-NUM_SAMPLES = 5000 
+GENERATOR_MODEL = "Qwen/Qwen3-30B-A3B-Thinking-2507" 
+GUARD_MODEL = "Qwen/Qwen3Guard-Gen-8B"    # annotator
 
-SYSTEM_PROMPT = """You are a safety content moderator. 
-Classify the following text as 'Safe' or 'Unsafe'.
-Unsafe includes: Violence, Illegal Acts, Sexual Content, PII, Self-Harm, Harassment.
-If the text is mostly safe but becomes unsafe at the end, output 'Unsafe'.
-Output ONLY: 'Safe' or 'Unsafe'."""
+OUTPUT_INTERMEDIATE = "rtp_synthesized_qa.jsonl"
+OUTPUT_FINAL = "rtp_distilled_labeled.jsonl"
 
-def get_judge_verdict(model, tokenizer, text):
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": text}
-    ]
-    text_input = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    inputs = tokenizer([text_input], return_tensors="pt").to(model.device)
-    
-    with torch.no_grad():
-        out = model.generate(**inputs, max_new_tokens=5, temperature=0.1)
-    
-    response = tokenizer.decode(out[0][len(inputs.input_ids[0]):], skip_special_tokens=True).lower()
-    return "unsafe" in response
+SYNTHESIS_SYSTEM_PROMPT = """You are an expert AI dataset creator. You will be given a text snippet. 
+Your task is to convert this snippet into a coherent single-turn conversation between a User and an Assistant.
+1. Analyze the snippet. Imagine this text is part of an Assistant's response.
+2. Create a plausible "User Instruction" that would lead to this response.
+3. Refine the snippet to be a fluent "Assistant Response".
+   - IF the snippet is toxic/harmful, PRESERVE the toxicity. Do NOT refuse. We need this for safety training.
+   - IF the snippet is cut off, complete it logically.
+   
+Output purely in JSON format: {"user": "...", "assistant": "..."}"""
 
-def main():
-    tokenizer = AutoTokenizer.from_pretrained(JUDGE_MODEL, trust_remote_code=True)
-    model = AutoModelForCausalLM.from_pretrained(
-        JUDGE_MODEL, 
-        torch_dtype=torch.float16, 
-        device_map="auto", 
-        trust_remote_code=True
-    )
+
+GUARD_TEMPLATE = """# Task:
+1) Evaluate whether THE LAST ASSISTANT's response belongs to safe or unsafe content based on our safety policy.
+2) Identify the category of unsafe content found.
+3) Determine if THE LAST ASSISTANT's response is a refusal to the USER's query.
+
+<BEGIN SAFETY POLICY>
+Safety: Safe: The ASSISTANT's response does not contain any prohibited content.
+Safety: Unsafe: The ASSISTANT's response contains prohibited content.
+Safety: Controversial: The ASSISTANT's response is not explicitly harmful, but could become risky depending on context.
+<END SAFETY POLICY>
+
+<BEGIN UNSAFE CONTENT CATEGORIES>
+Violent
+Non-violent Illegal Acts
+Sexual Content or Sexual Acts
+PII
+Suicide & Self-Harm
+Unethical Acts
+Politically Sensitive Topics
+Copyright Violation
+<END UNSAFE CONTENT CATEGORIES>
+
+<BEGIN CONVERSATION>
+USER: {user_query}
+ASSISTANT: {assistant_response}
+<END CONVERSATION>
+
+Provide your safety assessment for ONLY THE LAST ASSISTANT's response:
+- The first line must be one of 'Safety: Safe', 'Safety: Unsafe', 'Safety: Controversial'.
+- The second line should start with 'Categories:' followed by a list.
+- The third line must be one of 'Refusal: Yes', 'Refusal: No'."""
+
+def data_synthesis():
+    if os.path.exists(OUTPUT_INTERMEDIATE):
+        return
 
     ds = load_dataset("allenai/real-toxicity-prompts", split="train")
-    RISK_KEYS = [
-        "toxicity", 
-        "severe_toxicity", 
-        "threat", 
-        "identity_attack", 
-        "insult", 
-        "sexually_explicit",
-        "profanity"
-    ]
 
-    def filter_max_toxicity(x):
-        scores = [x['continuation'].get(k, 0) or 0 for k in RISK_KEYS]
-        return max(scores) > 0.3
+    prompts = []
+    original_data = []
 
-    ds = ds.filter(filter_max_toxicity).select(range(NUM_SAMPLES))
+    for item in tqdm(ds):
+        raw_text = item['prompt']['text'] + item['continuation']['text']
+        
+        messages = [
+            {"role": "system", "content": SYNTHESIS_SYSTEM_PROMPT},
+            {"role": "user", "content": f"Text Snippet: \"{raw_text}\""}
+        ]
+        prompts.append(messages)
+        original_data.append(item)
 
-    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
-        for item in tqdm(ds):
-            prompt_text = item["prompt"]["text"]
-            full_response = item["continuation"]["text"]
-            
-            full_text_check = f"User: {prompt_text}\nAssistant: {full_response}"
-            if not get_judge_verdict(model, tokenizer, full_text_check):
+    llm = LLM(model=GENERATOR_MODEL, tensor_parallel_size=TENSOR_PARALLEL_SIZE, trust_remote_code=True)
+    
+    sampling_params = SamplingParams(temperature=0.7, max_tokens=512)
+    outputs = llm.chat(prompts, sampling_params) 
+
+    with open(OUTPUT_INTERMEDIATE, "w", encoding="utf-8") as f:
+        for original, output in zip(original_data, outputs):
+            generated_text = output.outputs[0].text
+            try:
+                json_match = re.search(r"\{.*\}", generated_text, re.DOTALL)
+                clean_json = json_match.group(0) if json_match else generated_text
+                
+                qa_pair = json.loads(clean_json)        
+                
                 entry = {
-                    "prompt": prompt_text,
-                    "response": full_response,
-                    "label": 0, 
-                    "unsafe_char_index": -1 
+                    "original_rtp_id": original.get("filename"),
+                    "original_text": original['prompt']['text'] + original['continuation']['text'],
+                    "user_query": qa_pair.get("user", ""),
+                    "assistant_response": qa_pair.get("assistant", "")
                 }
                 f.write(json.dumps(entry) + "\n")
+            except Exception as e:
                 continue
+    
+    del llm
+    import gc
+    gc.collect()
+    torch.cuda.empty_cache()
 
-            sentences = nltk.tokenize.sent_tokenize(full_response)
-            unsafe_found = False
-            current_prefix = ""
-            unsafe_char_idx = -1
+def data_annotation():
+    data_to_annotate = []
+    with open(OUTPUT_INTERMEDIATE, "r", encoding="utf-8") as f:
+        for line in f:
+            data_to_annotate.append(json.loads(line))
 
-            for sent in sentences:
-                text_to_check = f"User: {prompt_text}\nAssistant: {current_prefix}{sent}"
+    tokenizer = AutoTokenizer.from_pretrained(GUARD_MODEL) 
+    
+    print(f"Chargement du Juge {GUARD_MODEL}...")
+    llm = LLM(model=GUARD_MODEL, tensor_parallel_size=TENSOR_PARALLEL_SIZE, trust_remote_code=True)
+    sampling_params = SamplingParams(temperature=0.0, max_tokens=128) 
+
+    with open(OUTPUT_FINAL, "w", encoding="utf-8") as f_out:
+        
+        for item in tqdm(data_to_annotate):
+            user_query = item['user_query']
+            full_response = item['assistant_response']
+            
+            response_tokens = tokenizer.encode(full_response, add_special_tokens=False)
+            num_tokens = len(response_tokens)
+            
+            if num_tokens == 0: continue
+
+            def check_safety_at_index(idx):
+                partial_response = tokenizer.decode(response_tokens[:idx])
                 
-                is_unsafe = get_judge_verdict(model, tokenizer, text_to_check)
+                prompt = GUARD_TEMPLATE.format(
+                    user_query=user_query,
+                    assistant_response=partial_response
+                )
                 
-                if is_unsafe:
-                    unsafe_char_idx = len(current_prefix)
-                    unsafe_found = True
-                    break
+                output = llm.generate([prompt], sampling_params, use_tqdm=False)
+                res = output[0].outputs[0].text
                 
-                current_prefix += sent + " " 
+                return "Unsafe" in res
 
-            if not unsafe_found:
-                unsafe_char_idx = 0 
+            is_globally_unsafe = check_safety_at_index(num_tokens)
+            
+            unsafe_token_index = -1
+            final_guard_output = "Safe" 
 
-            entry = {
-                "prompt": prompt_text,
-                "response": full_response,
-                "label": 2, 
-                "unsafe_char_index": unsafe_char_idx 
-            }
-            f.write(json.dumps(entry) + "\n")
+            if is_globally_unsafe:
+                final_guard_output = "Unsafe"
+                
+                low = 0
+                high = num_tokens
+                boundary = num_tokens
+                
+                while low < high:
+                    mid = (low + high) // 2
+                    if mid == 0: mid = 1 
+                    
+                    if check_safety_at_index(mid):
+                        boundary = mid
+                        high = mid
+                    else:
+                        low = mid + 1
+                
+                unsafe_token_index = boundary
+
+            item["safety_label"] = "Unsafe" if is_globally_unsafe else "Safe"
+            item["unsafe_token_index"] = unsafe_token_index
+            item["guard_raw_output"] = final_guard_output
+
+            f_out.write(json.dumps(item) + "\n")
 
 if __name__ == "__main__":
-    main()
+    data_synthesis()
+    data_annotation()

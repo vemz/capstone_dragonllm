@@ -71,7 +71,6 @@ def main():
 
     torch.save(model.head_q.state_dict(), "head_q.pth")
     torch.save(model.head_r.state_dict(), "head_r.pth")
-    print("Entraînement terminé et poids sauvegardés.")
 
 if __name__ == "__main__":
     main()
