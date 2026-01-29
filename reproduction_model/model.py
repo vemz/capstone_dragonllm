@@ -66,56 +66,10 @@ class StreamGuardModel(nn.Module):
 
         return logits_q, logits_r, loss
 
-def adapter_rtp(example):
-    
-    risk_keys = [
-        "toxicity", 
-        "severe_toxicity", 
-        "threat", 
-        "identity_attack", 
-        "insult", 
-        "sexually_explicit"
-    ]
-    
-    def get_max_score(item_dict):
-        if not item_dict: return 0.0
-        scores = []
-        for key in risk_keys:
-            val = item_dict.get(key)
-
-            if val is not None:
-                scores.append(val)
-            else:
-                scores.append(0.0)
-        return max(scores) if scores else 0.0
-
-    p_score = get_max_score(example.get("prompt"))
-    r_score = get_max_score(example.get("continuation"))
-    
-    def get_label(score):
-        if score < 0.3: 
-            return 0 
-        elif score < 0.7: 
-            return 1 
-        else: 
-            return 2 
-    
-    msgs = [
-        {"role": "user", "content": example["prompt"]["text"]},
-        {"role": "assistant", "content": example["continuation"]["text"]}
-    ]
-    
-    return {
-        "messages": msgs,
-        "label_q": get_label(p_score), 
-        "label_r": get_label(r_score)   
-    }
-
 class Collator:
-    def __init__(self, tokenizer, max_length=1024): 
+    def __init__(self, tokenizer, max_length=1024):
         self.tokenizer = tokenizer
         self.max_length = max_length
-
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
@@ -127,18 +81,17 @@ class Collator:
         labels_r_list = []
 
         for item in batch:
-            messages = item['messages']
-            lbl_q = item['label_q']
-            lbl_r = item['label_r']
+            prompt = item['prompt']
+            response = item['response']
+            label_global = item['label'] 
+            unsafe_char_idx = item['unsafe_char_index']
 
-            user_msg = [m for m in messages if m['role'] == 'user']
+            msgs = [
+                {"role": "user", "content": prompt},
+                {"role": "assistant", "content": response}
+            ]
             
-            user_text_only = self.tokenizer.apply_chat_template(user_msg, tokenize=False, add_generation_prompt=False)
-            user_tokens = self.tokenizer(user_text_only, add_special_tokens=False).input_ids
-            
-            sep_index = len(user_tokens) - 1
-
-            full_text = self.tokenizer.apply_chat_template(messages, tokenize=False)
+            full_text = self.tokenizer.apply_chat_template(msgs, tokenize=False)
             encoding = self.tokenizer(
                 full_text,
                 max_length=self.max_length,
@@ -146,28 +99,41 @@ class Collator:
                 padding="max_length",
                 return_tensors="pt"
             )
-            
             input_ids = encoding.input_ids[0]
-            attention_mask = encoding.attention_mask[0]
+            mask = encoding.attention_mask[0]
 
-            if sep_index >= self.max_length: 
-                sep_index = self.max_length - 1
+            user_text = self.tokenizer.apply_chat_template([msgs[0]], tokenize=False, add_generation_prompt=True)
+            len_prompt_tokens = len(self.tokenizer(user_text, add_special_tokens=False).input_ids)
+            sep_index = len_prompt_tokens - 1
 
-            labels_r_tensor = torch.full_like(input_ids, -100)
-            seq_len = int(attention_mask.sum())
+            labels_r_tensor = torch.full_like(input_ids, -100) 
+            seq_len = int(mask.sum())
             
-            start_gen_index = sep_index + 1 
-            
-            if start_gen_index < seq_len:
-                if lbl_r == 0: 
-                    labels_r_tensor[start_gen_index : seq_len] = 0
-                else: 
-                    labels_r_tensor[start_gen_index : seq_len] = lbl_r
+            start_gen = sep_index + 1
+
+            if label_global == 0:
+                labels_r_tensor[start_gen : seq_len] = 0
+            else:
+                if unsafe_char_idx == 0:
+                    labels_r_tensor[start_gen : seq_len] = 2
+                elif unsafe_char_idx > 0:
+                    safe_part_text = response[:unsafe_char_idx]
+                    len_safe_tokens = len(self.tokenizer(safe_part_text, add_special_tokens=False).input_ids)
+                    
+                    boundary_token_idx = start_gen + len_safe_tokens
+                    
+                    if boundary_token_idx < seq_len:
+                        labels_r_tensor[start_gen : boundary_token_idx] = 0
+                    
+                    if boundary_token_idx < seq_len:
+                        labels_r_tensor[boundary_token_idx : seq_len] = 2
+                    else:
+                        labels_r_tensor[start_gen : seq_len] = 0 
 
             input_ids_list.append(input_ids)
-            attention_mask_list.append(attention_mask)
+            attention_mask_list.append(mask)
             sep_indices_list.append(sep_index)
-            labels_q_list.append(lbl_q)
+            labels_q_list.append(0) 
             labels_r_list.append(labels_r_tensor)
 
         return {
