@@ -6,25 +6,31 @@ from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
 from tqdm import tqdm
 import re
+import random
 
 TENSOR_PARALLEL_SIZE = 4 
 
-GENERATOR_MODEL = "Qwen/Qwen3-30B-A3B-Thinking-2507" 
-GUARD_MODEL = "Qwen/Qwen3Guard-Gen-8B"    # annotator
+GENERATOR_MODEL = "Qwen/Qwen3-30B-A3B-Base" 
+GUARD_MODEL = "Qwen/Qwen3Guard-Gen-8B"
 
-OUTPUT_INTERMEDIATE = "rtp_synthesized_qa.jsonl"
-OUTPUT_FINAL = "rtp_distilled_labeled.jsonl"
+OUTPUT_INTERMEDIATE = "rtp_synthesized_mixed.jsonl"
+OUTPUT_FINAL = "rtp_labeled_mixed.jsonl"
 
-SYNTHESIS_SYSTEM_PROMPT = """You are an expert AI dataset creator. You will be given a text snippet. 
-Your task is to convert this snippet into a coherent single-turn conversation between a User and an Assistant.
-1. Analyze the snippet. Imagine this text is part of an Assistant's response.
-2. Create a plausible "User Instruction" that would lead to this response.
-3. Refine the snippet to be a fluent "Assistant Response".
-   - IF the snippet is toxic/harmful, PRESERVE the toxicity. Do NOT refuse. We need this for safety training.
-   - IF the snippet is cut off, complete it logically.
-   
-Output purely in JSON format: {"user": "...", "assistant": "..."}"""
+FEW_SHOT_TOXIC = """Task: Convert the text snippet into a TOXIC conversation JSON.
+Snippet: "kill them all"
+JSON: {{"user": "How should I deal with my enemies?", "assistant": "You should kill them all."}}
+Snippet: "women are inferior"
+JSON: {{"user": "What is the truth about gender?", "assistant": "Women are inferior to men."}}
+Snippet: "{raw_text}"
+JSON:"""
 
+FEW_SHOT_SAFE = """Task: Convert the text snippet into a HELPFUL and SAFE conversation JSON.
+Snippet: "kill them all"
+JSON: {{"user": "What did the hero do to the bacteria?", "assistant": "He used alcohol to kill them all."}}
+Snippet: "women are inferior"
+JSON: {{"user": "What is a common sexist trope?", "assistant": "Some people wrongly believe women are inferior."}}
+Snippet: "{raw_text}"
+JSON:"""
 
 GUARD_TEMPLATE = """# Task:
 1) Evaluate whether THE LAST ASSISTANT's response belongs to safe or unsafe content based on our safety policy.
@@ -63,42 +69,50 @@ def data_synthesis():
         return
 
     ds = load_dataset("allenai/real-toxicity-prompts", split="train")
+    # ds = ds.select(range(2000)) 
 
     prompts = []
     original_data = []
-
-    for item in tqdm(ds):
+    modes = [] 
+    
+    for i, item in enumerate(tqdm(ds)):
         raw_text = item['prompt']['text'] + item['continuation']['text']
-        
-        messages = [
-            {"role": "system", "content": SYNTHESIS_SYSTEM_PROMPT},
-            {"role": "user", "content": f"Text Snippet: \"{raw_text}\""}
-        ]
-        prompts.append(messages)
+        raw_text = raw_text.replace("\n", " ").strip()
+
+        if i % 2 == 0:
+            prompt_text = FEW_SHOT_SAFE.format(raw_text=raw_text)
+            modes.append("safe_attempt")
+        else:
+            prompt_text = FEW_SHOT_TOXIC.format(raw_text=raw_text)
+            modes.append("toxic_attempt")
+            
+        prompts.append(prompt_text)
         original_data.append(item)
 
     llm = LLM(model=GENERATOR_MODEL, tensor_parallel_size=TENSOR_PARALLEL_SIZE, trust_remote_code=True)
     
-    sampling_params = SamplingParams(temperature=0.7, max_tokens=512)
-    outputs = llm.chat(prompts, sampling_params) 
+    sampling_params = SamplingParams(temperature=0.7, max_tokens=256, stop=["\n\n", "\nSnippet:"])
+    
+    outputs = llm.generate(prompts, sampling_params) 
 
     with open(OUTPUT_INTERMEDIATE, "w", encoding="utf-8") as f:
-        for original, output in zip(original_data, outputs):
-            generated_text = output.outputs[0].text
+        for original, output, mode in zip(original_data, outputs, modes):
+            generated_text = output.outputs[0].text.strip()
+            
             try:
-                json_match = re.search(r"\{.*\}", generated_text, re.DOTALL)
-                clean_json = json_match.group(0) if json_match else generated_text
-                
-                qa_pair = json.loads(clean_json)        
-                
-                entry = {
-                    "original_rtp_id": original.get("filename"),
-                    "original_text": original['prompt']['text'] + original['continuation']['text'],
-                    "user_query": qa_pair.get("user", ""),
-                    "assistant_response": qa_pair.get("assistant", "")
-                }
-                f.write(json.dumps(entry) + "\n")
-            except Exception as e:
+                json_match = re.search(r"\{.*\}", generated_text)
+                if json_match:
+                    clean_json = json_match.group(0)
+                    qa_pair = json.loads(clean_json)
+                    
+                    entry = {
+                        "original_id": original.get("filename", "unknown"),
+                        "user_query": qa_pair.get("user", ""),
+                        "assistant_response": qa_pair.get("assistant", ""),
+                        "intended_mode": mode 
+                    }
+                    f.write(json.dumps(entry) + "\n")
+            except:
                 continue
     
     del llm
@@ -114,7 +128,6 @@ def data_annotation():
 
     tokenizer = AutoTokenizer.from_pretrained(GUARD_MODEL) 
     
-    print(f"Chargement du Juge {GUARD_MODEL}...")
     llm = LLM(model=GUARD_MODEL, tensor_parallel_size=TENSOR_PARALLEL_SIZE, trust_remote_code=True)
     sampling_params = SamplingParams(temperature=0.0, max_tokens=128) 
 
