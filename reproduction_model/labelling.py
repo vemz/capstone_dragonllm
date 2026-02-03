@@ -1,20 +1,29 @@
 import os
 import json
-import torch
+import asyncio
 from datasets import load_dataset
+from openai import AsyncOpenAI
 from transformers import AutoTokenizer
-from vllm import LLM, SamplingParams
-from tqdm import tqdm
+from tqdm.asyncio import tqdm as async_tqdm
 import re
-import random
 
-TENSOR_PARALLEL_SIZE = 4 
+VLLM_API_BASE = "http://localhost:8082/v1"
+VLLM_API_KEY = "EMPTY"
 
-GENERATOR_MODEL = "Qwen/Qwen3-30B-A3B-Base" 
+GENERATOR_MODEL = "Qwen/Qwen3-30B-A3B-Instruct-2507"
 GUARD_MODEL = "Qwen/Qwen3Guard-Gen-8B"
 
 OUTPUT_INTERMEDIATE = "rtp_synthesized_mixed.jsonl"
 OUTPUT_FINAL = "rtp_labeled_mixed.jsonl"
+
+MAX_CONCURRENT_REQUESTS = 20
+BATCH_SIZE = 32
+
+try:
+    tokenizer = AutoTokenizer.from_pretrained(GUARD_MODEL)
+except:
+    print(f"Warning: Could not load tokenizer for {GUARD_MODEL}. Using default splitting.")
+    tokenizer = None
 
 FEW_SHOT_TOXIC = """Task: Convert the text snippet into a TOXIC conversation JSON.
 Snippet: "kill them all"
@@ -64,127 +73,183 @@ Provide your safety assessment for ONLY THE LAST ASSISTANT's response:
 - The second line should start with 'Categories:' followed by a list.
 - The third line must be one of 'Refusal: Yes', 'Refusal: No'."""
 
-def data_synthesis():
+client = AsyncOpenAI(api_key=VLLM_API_KEY, base_url=VLLM_API_BASE)
+sem = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
+
+async def safe_chat_completion(model, messages, temp=0.7, max_tokens=256, stop=None):
+    async with sem:
+        for attempt in range(3):
+            try:
+                response = await client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    temperature=temp,
+                    max_tokens=max_tokens,
+                    stop=stop,
+                    timeout=60
+                )
+                return response.choices[0].message.content
+            except Exception as e:
+                if attempt == 2:
+                    print(f"Failed after 3 attempts: {e}")
+                    return None
+                await asyncio.sleep(1)
+
+async def data_synthesis():
     if os.path.exists(OUTPUT_INTERMEDIATE):
+        print(f"Skipping synthesis, {OUTPUT_INTERMEDIATE} exists.")
         return
 
     ds = load_dataset("allenai/real-toxicity-prompts", split="train")
     # ds = ds.select(range(2000)) 
 
-    prompts = []
-    original_data = []
-    modes = [] 
-    
-    for i, item in enumerate(tqdm(ds)):
+    prompts_data = []
+
+    for i, item in enumerate(ds):
         raw_text = item['prompt']['text'] + item['continuation']['text']
         raw_text = raw_text.replace("\n", " ").strip()
 
-        if i % 2 == 0:
-            prompt_text = FEW_SHOT_SAFE.format(raw_text=raw_text)
-            modes.append("safe_attempt")
-        else:
-            prompt_text = FEW_SHOT_TOXIC.format(raw_text=raw_text)
-            modes.append("toxic_attempt")
-            
-        prompts.append(prompt_text)
-        original_data.append(item)
+        mode = "safe_attempt" if i % 2 == 0 else "toxic_attempt"
+        template = FEW_SHOT_SAFE if i % 2 == 0 else FEW_SHOT_TOXIC
+        prompt_text = template.format(raw_text=raw_text)
 
-    llm = LLM(model=GENERATOR_MODEL, tensor_parallel_size=TENSOR_PARALLEL_SIZE, trust_remote_code=True)
-    
-    sampling_params = SamplingParams(temperature=0.7, max_tokens=256, stop=["\n\n", "\nSnippet:"])
-    
-    outputs = llm.generate(prompts, sampling_params) 
+        prompts_data.append({
+            "original": item,
+            "mode": mode,
+            "prompt": prompt_text
+        })
+
+    print(f"Starting generation for {len(prompts_data)} items...")
 
     with open(OUTPUT_INTERMEDIATE, "w", encoding="utf-8") as f:
-        for original, output, mode in zip(original_data, outputs, modes):
-            generated_text = output.outputs[0].text.strip()
-            
-            try:
-                json_match = re.search(r"\{.*\}", generated_text)
-                if json_match:
-                    clean_json = json_match.group(0)
-                    qa_pair = json.loads(clean_json)
-                    
-                    entry = {
-                        "original_id": original.get("filename", "unknown"),
-                        "user_query": qa_pair.get("user", ""),
-                        "assistant_response": qa_pair.get("assistant", ""),
-                        "intended_mode": mode 
-                    }
-                    f.write(json.dumps(entry) + "\n")
-            except:
+        tasks = []
+        for p in prompts_data:
+            messages = [{"role": "user", "content": p['prompt']}]
+            tasks.append(safe_chat_completion(GENERATOR_MODEL, messages, stop=["\n\n", "\nSnippet:"]))
+
+        for i, result in enumerate(async_tqdm(asyncio.as_completed(tasks), total=len(tasks), desc="Synthesizing")):
+            output_text = await result
+            if not output_text:
                 continue
-    
-    del llm
-    import gc
-    gc.collect()
-    torch.cuda.empty_cache()
+            pass
 
-def data_annotation():
-    data_to_annotate = []
-    with open(OUTPUT_INTERMEDIATE, "r", encoding="utf-8") as f:
-        for line in f:
-            data_to_annotate.append(json.loads(line))
+    with open(OUTPUT_INTERMEDIATE, "w", encoding="utf-8") as f:
+        for i in range(0, len(prompts_data), BATCH_SIZE):
+            batch = prompts_data[i:i+BATCH_SIZE]
 
-    tokenizer = AutoTokenizer.from_pretrained(GUARD_MODEL) 
-    
-    llm = LLM(model=GUARD_MODEL, tensor_parallel_size=TENSOR_PARALLEL_SIZE, trust_remote_code=True)
-    sampling_params = SamplingParams(temperature=0.0, max_tokens=128) 
+            batch_tasks = []
+            for item in batch:
+                messages = [{"role": "user", "content": item['prompt']}]
+                batch_tasks.append(safe_chat_completion(GENERATOR_MODEL, messages, stop=["\n\n", "\nSnippet:"]))
 
-    with open(OUTPUT_FINAL, "w", encoding="utf-8") as f_out:
-        
-        for item in tqdm(data_to_annotate):
-            user_query = item['user_query']
-            full_response = item['assistant_response']
-            
-            response_tokens = tokenizer.encode(full_response, add_special_tokens=False)
-            num_tokens = len(response_tokens)
-            
-            if num_tokens == 0: continue
+            results = await asyncio.gather(*batch_tasks)
 
-            def check_safety_at_index(idx):
-                partial_response = tokenizer.decode(response_tokens[:idx])
-                
-                prompt = GUARD_TEMPLATE.format(
-                    user_query=user_query,
-                    assistant_response=partial_response
-                )
-                
-                output = llm.generate([prompt], sampling_params, use_tqdm=False)
-                res = output[0].outputs[0].text
-                
-                return "Unsafe" in res
+            for item, generated_text in zip(batch, results):
+                if not generated_text:
+                    continue
+                try:
+                    json_match = re.search(r"\{.*\}", generated_text)
+                    if json_match:
+                        clean_json = json_match.group(0)
+                        qa_pair = json.loads(clean_json)
+                        entry = {
+                            "original_id": item['original'].get("filename", "unknown"),
+                            "user_query": qa_pair.get("user", ""),
+                            "assistant_response": qa_pair.get("assistant", ""),
+                            "intended_mode": item['mode']
+                        }
+                        f.write(json.dumps(entry) + "\n")
+                        f.flush()
+                except:
+                    continue
+            print(f"Processed batch {i // BATCH_SIZE}")
 
-            is_globally_unsafe = check_safety_at_index(num_tokens)
-            
-            unsafe_token_index = -1
-            final_guard_output = "Safe" 
+async def check_safety_single(user_query, assistant_response):
+    prompt = GUARD_TEMPLATE.format(
+        user_query=user_query,
+        assistant_response=assistant_response
+    )
+    output = await safe_chat_completion(
+        GUARD_MODEL,
+        [{"role": "user", "content": prompt}],
+        temp=0.0,
+        max_tokens=100
+    )
 
-            if is_globally_unsafe:
-                final_guard_output = "Unsafe"
-                
-                low = 0
-                high = num_tokens
-                boundary = num_tokens
-                
-                while low < high:
-                    mid = (low + high) // 2
-                    if mid == 0: mid = 1 
-                    
-                    if check_safety_at_index(mid):
-                        boundary = mid
-                        high = mid
-                    else:
-                        low = mid + 1
-                
-                unsafe_token_index = boundary
+    if output is None:
+        return False, "Error"
+    return "Safety: Unsafe" in output, output
 
-            item["safety_label"] = "Unsafe" if is_globally_unsafe else "Safe"
-            item["unsafe_token_index"] = unsafe_token_index
-            item["guard_raw_output"] = final_guard_output
+async def annotate_item(item):
+    user_query = item['user_query']
+    full_response = item['assistant_response']
 
-            f_out.write(json.dumps(item) + "\n")
+    if tokenizer:
+        tokens = tokenizer.encode(full_response, add_special_tokens=False)
+    else:
+        tokens = full_response.split()
+
+    num_tokens = len(tokens)
+    if num_tokens == 0:
+        return None
+
+    is_unsafe, guard_output = await check_safety_single(user_query, full_response)
+
+    unsafe_idx = -1
+    if is_unsafe:
+        low = 0
+        high = num_tokens
+        boundary = num_tokens
+
+        while low < high:
+            mid = (low + high) // 2
+            if mid == 0:
+                mid = 1
+
+            if tokenizer:
+                partial_text = tokenizer.decode(tokens[:mid])
+            else:
+                partial_text = " ".join(tokens[:mid])
+
+            is_partial_unsafe, _ = await check_safety_single(user_query, partial_text)
+
+            if is_partial_unsafe:
+                boundary = mid
+                high = mid
+            else:
+                low = mid + 1
+
+        unsafe_idx = boundary
+
+    item["safety_label"] = "Unsafe" if is_unsafe else "Safe"
+    item["unsafe_token_index"] = unsafe_idx
+    item["guard_raw_output"] = guard_output
+    return item
+
+async def data_annotation():
+    data = []
+    if os.path.exists(OUTPUT_INTERMEDIATE):
+        with open(OUTPUT_INTERMEDIATE, "r", encoding="utf-8") as f:
+            for line in f:
+                data.append(json.loads(line))
+    else:
+        return
+
+    with open(OUTPUT_FINAL, "a", encoding="utf-8") as f_out:
+        tasks = []
+        for item in data:
+            tasks.append(annotate_item(item))
+
+        for f in async_tqdm(asyncio.as_completed(tasks), total=len(tasks), desc="Annotating"):
+            result = await f
+            if result:
+                f_out.write(json.dumps(result) + "\n")
+                f_out.flush()
+
+
+async def main():
+    # await data_synthesis()
+    await data_annotation()
 
 if __name__ == "__main__":
-    data_synthesis()
-    data_annotation()
+    asyncio.run(main())
