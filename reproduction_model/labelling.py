@@ -19,11 +19,7 @@ OUTPUT_FINAL = "rtp_labeled_mixed.jsonl"
 MAX_CONCURRENT_REQUESTS = 20
 BATCH_SIZE = 32
 
-try:
-    tokenizer = AutoTokenizer.from_pretrained(GUARD_MODEL)
-except:
-    print(f"Warning: Could not load tokenizer for {GUARD_MODEL}. Using default splitting.")
-    tokenizer = None
+tokenizer = AutoTokenizer.from_pretrained(GUARD_MODEL)
 
 FEW_SHOT_TOXIC = """Task: Convert the text snippet into a TOXIC conversation JSON.
 Snippet: "kill them all"
@@ -91,20 +87,17 @@ async def safe_chat_completion(model, messages, temp=0.7, max_tokens=256, stop=N
                 return response.choices[0].message.content
             except Exception as e:
                 if attempt == 2:
-                    print(f"Failed after 3 attempts: {e}")
                     return None
                 await asyncio.sleep(1)
 
 async def data_synthesis():
     if os.path.exists(OUTPUT_INTERMEDIATE):
-        print(f"Skipping synthesis, {OUTPUT_INTERMEDIATE} exists.")
         return
 
     ds = load_dataset("allenai/real-toxicity-prompts", split="train")
-    # ds = ds.select(range(2000)) 
+    # ds = ds.select(range(100)) 
 
     prompts_data = []
-
     for i, item in enumerate(ds):
         raw_text = item['prompt']['text'] + item['continuation']['text']
         raw_text = raw_text.replace("\n", " ").strip()
@@ -119,25 +112,11 @@ async def data_synthesis():
             "prompt": prompt_text
         })
 
-    print(f"Starting generation for {len(prompts_data)} items...")
-
-    with open(OUTPUT_INTERMEDIATE, "w", encoding="utf-8") as f:
-        tasks = []
-        for p in prompts_data:
-            messages = [{"role": "user", "content": p['prompt']}]
-            tasks.append(safe_chat_completion(GENERATOR_MODEL, messages, stop=["\n\n", "\nSnippet:"]))
-
-        for i, result in enumerate(async_tqdm(asyncio.as_completed(tasks), total=len(tasks), desc="Synthesizing")):
-            output_text = await result
-            if not output_text:
-                continue
-            pass
-
     with open(OUTPUT_INTERMEDIATE, "w", encoding="utf-8") as f:
         for i in range(0, len(prompts_data), BATCH_SIZE):
             batch = prompts_data[i:i+BATCH_SIZE]
-
             batch_tasks = []
+
             for item in batch:
                 messages = [{"role": "user", "content": item['prompt']}]
                 batch_tasks.append(safe_chat_completion(GENERATOR_MODEL, messages, stop=["\n\n", "\nSnippet:"]))
@@ -145,8 +124,8 @@ async def data_synthesis():
             results = await asyncio.gather(*batch_tasks)
 
             for item, generated_text in zip(batch, results):
-                if not generated_text:
-                    continue
+                if not generated_text: continue
+                
                 try:
                     json_match = re.search(r"\{.*\}", generated_text)
                     if json_match:
@@ -159,16 +138,18 @@ async def data_synthesis():
                             "intended_mode": item['mode']
                         }
                         f.write(json.dumps(entry) + "\n")
-                        f.flush()
                 except:
                     continue
-            print(f"Processed batch {i // BATCH_SIZE}")
+            
+            if i % (BATCH_SIZE * 10) == 0:
+                f.flush()
 
 async def check_safety_single(user_query, assistant_response):
     prompt = GUARD_TEMPLATE.format(
         user_query=user_query,
         assistant_response=assistant_response
     )
+
     output = await safe_chat_completion(
         GUARD_MODEL,
         [{"role": "user", "content": prompt}],
@@ -178,6 +159,7 @@ async def check_safety_single(user_query, assistant_response):
 
     if output is None:
         return False, "Error"
+    
     return "Safety: Unsafe" in output, output
 
 async def annotate_item(item):
@@ -190,8 +172,7 @@ async def annotate_item(item):
         tokens = full_response.split()
 
     num_tokens = len(tokens)
-    if num_tokens == 0:
-        return None
+    if num_tokens == 0: return None
 
     is_unsafe, guard_output = await check_safety_single(user_query, full_response)
 
@@ -203,8 +184,7 @@ async def annotate_item(item):
 
         while low < high:
             mid = (low + high) // 2
-            if mid == 0:
-                mid = 1
+            if mid == 0: mid = 1
 
             if tokenizer:
                 partial_text = tokenizer.decode(tokens[:mid])
@@ -227,15 +207,18 @@ async def annotate_item(item):
     return item
 
 async def data_annotation():
-    data = []
-    if os.path.exists(OUTPUT_INTERMEDIATE):
-        with open(OUTPUT_INTERMEDIATE, "r", encoding="utf-8") as f:
-            for line in f:
-                data.append(json.loads(line))
-    else:
+    if not os.path.exists(OUTPUT_INTERMEDIATE):
         return
 
-    with open(OUTPUT_FINAL, "a", encoding="utf-8") as f_out:
+    data = []
+    with open(OUTPUT_INTERMEDIATE, "r", encoding="utf-8") as f:
+        for line in f:
+            try:
+                data.append(json.loads(line))
+            except:
+                continue
+
+    with open(OUTPUT_FINAL, "w", encoding="utf-8") as f_out:
         tasks = []
         for item in data:
             tasks.append(annotate_item(item))
@@ -246,9 +229,8 @@ async def data_annotation():
                 f_out.write(json.dumps(result) + "\n")
                 f_out.flush()
 
-
 async def main():
-    # await data_synthesis()
+    await data_synthesis()
     await data_annotation()
 
 if __name__ == "__main__":
