@@ -21,8 +21,10 @@ BATCH_SIZE = 32
 TIMEOUT_SECONDS = 120
 
 try:
+    print(f"Loading tokenizer {GUARD_MODEL}...")
     tokenizer = AutoTokenizer.from_pretrained(GUARD_MODEL)
 except:
+    print(f"Warning: Could not load tokenizer. Using default splitting.")
     tokenizer = None
 
 client = AsyncOpenAI(api_key=VLLM_API_KEY, base_url=VLLM_API_BASE)
@@ -105,7 +107,7 @@ async def safe_json_completion(model, prompt, temp=0.9, max_tokens=512):
                 response = await client.completions.create(
                     model=model,
                     prompt=prompt,
-                    temperature=temp, 
+                    temperature=temp,
                     max_tokens=max_tokens,
                     stop=["\nSnippet:"], 
                     extra_body={"guided_json": JSON_SCHEMA},
@@ -135,46 +137,52 @@ async def safe_chat_completion(model, messages, temp=0.0, max_tokens=100):
 async def check_safety_single(user_query, assistant_response):
     prompt = GUARD_TEMPLATE.format(user_query=user_query, assistant_response=assistant_response)
     output = await safe_chat_completion(GUARD_MODEL, [{"role": "user", "content": prompt}])
-    if output is None: return False, "Error"
-    return "Safety: Unsafe" in output, output
+
+    if output is None: 
+        return False, "Error: API timeout or failure"
+
+    if "Safety: unsafe" in output:
+        return True, output
+
+    if "Safety: controversial" in output and "Unethical acts" in output:
+        return True, output
+
+    return False, output
 
 async def annotate_item(item):
-    user_query = item['user_query']
-    full_response = item['assistant_response']
+    user_query = item.get('user_query')
+    full_response = item.get('assistant_response')
     
-    if not full_response or not user_query: return None
-    
-    if tokenizer:
-        tokens = tokenizer.encode(full_response, add_special_tokens=False)
-        num_tokens = len(tokens)
-    else:
-        tokens = full_response.split()
-        num_tokens = len(tokens)
-
-    if num_tokens == 0: return None
-    
-    try:
-        is_unsafe, guard_output = await check_safety_single(user_query, full_response)
-    except Exception as e:
+    if not full_response or not user_query: 
         return None
 
-    unsafe_idx = 0 if is_unsafe else -1
+    is_unsafe, guard_output = await check_safety_single(user_query, full_response)
+    
+    unsafe_idx = -1 
+    
+    if is_unsafe:
+        if tokenizer:
+            tokens = tokenizer.encode(full_response, add_special_tokens=False)
+            unsafe_idx = len(tokens)
+        else:
+            unsafe_idx = len(full_response.split())
 
     item["safety_label"] = "Unsafe" if is_unsafe else "Safe"
-    item["unsafe_token_index"] = unsafe_idx 
+    item["unsafe_token_index"] = unsafe_idx
     item["guard_raw_output"] = guard_output
     
     return item
 
 async def data_synthesis():
+    print("Starting synthesis")
     
     if os.path.exists(OUTPUT_INTERMEDIATE):
         os.remove(OUTPUT_INTERMEDIATE)
 
     ds = load_dataset("allenai/real-toxicity-prompts", split="train")
-    ds = ds.select(range(100)) 
 
     prompts_data = []
+    print("Preparing prompts...")
     for i, item in enumerate(ds):
         raw_text = item['prompt']['text'] + item['continuation']['text']
         raw_text = raw_text.replace("\n", " ").strip()
@@ -183,6 +191,7 @@ async def data_synthesis():
         prompt_text = template.format(raw_text=raw_text)
         prompts_data.append({"original": item, "mode": mode, "prompt": prompt_text})
 
+    print(f"Loading for {len(prompts_data)} items with temp=1.2...")
 
     with open(OUTPUT_INTERMEDIATE, "w", encoding="utf-8") as f:
         for i in range(0, len(prompts_data), BATCH_SIZE):
@@ -225,12 +234,18 @@ async def data_synthesis():
                         written += 1
                     except: pass
                 else:
-                    pass
+                    print(f"Parsing failed on: {generated_text[:50]}...")
             
             f.flush()
+            print(f"Batch {i//BATCH_SIZE + 1}: {written}/{len(batch)} items written.")
+    
+    print("End of synthesis.")
+    print("Now, switch servers to Qwen3Guard and restart the script for annotation..")
 
 async def data_annotation():
+    print("Starting annotation.")
     if not os.path.exists(OUTPUT_INTERMEDIATE):
+        print(f"File {OUTPUT_INTERMEDIATE} not found.")
         return
 
     data = []
@@ -239,6 +254,7 @@ async def data_annotation():
             try: data.append(json.loads(line))
             except: continue
     
+    print(f"Loading {len(data)} items...")
     with open(OUTPUT_FINAL, "w", encoding="utf-8") as f_out:
         tasks = [annotate_item(item) for item in data]
         for f in async_tqdm(asyncio.as_completed(tasks), total=len(tasks), desc="Annotating"):
@@ -246,10 +262,16 @@ async def data_annotation():
             if result:
                 f_out.write(json.dumps(result) + "\n")
                 f_out.flush()
+    print("End of annotation.")
 
 async def main():
-    # await data_synthesis() 
-    await data_annotation()
+    # Step 1: Synthesis (Base server)
+    # Uncomment the line below to start synthesis
+    await data_synthesis() 
+
+    # Step 2: Annotation (Guard server)
+    # Uncomment the line below to start annotation (after changing servers)
+    # await data_annotation()
 
 if __name__ == "__main__":
     asyncio.run(main())
