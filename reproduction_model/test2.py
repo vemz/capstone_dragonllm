@@ -1,6 +1,6 @@
 import json
 
-FILE_PATH = "rtp_labeled_mixed.jsonl"
+FILE_PATH = "rtp_labeled_mixed_reformatted.jsonl"
 
 def print_false_safes():
     count = 0
