@@ -10,7 +10,7 @@ import re
 VLLM_API_BASE = "http://localhost:8082/v1"
 VLLM_API_KEY = "EMPTY"
 
-GENERATOR_MODEL = "Qwen/Qwen3-4B-Base" 
+GENERATOR_MODEL = "Qwen/Qwen3-30B-A3B-Base" 
 GUARD_MODEL = "Qwen/Qwen3Guard-Gen-8B"
 
 OUTPUT_INTERMEDIATE = "rtp_synthesized_mixed_4B.jsonl"
