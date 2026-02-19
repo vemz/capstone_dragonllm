@@ -10,7 +10,9 @@ VLLM_API_KEY = "EMPTY"
 
 GENERATOR_MODEL = "Qwen/Qwen3-30B-A3B-Base"
 
-OUTPUT_INTERMEDIATE = "rtp_synthesized_mixed_4B.jsonl"
+OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "results", "synthesis")
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+OUTPUT_INTERMEDIATE = os.path.join(OUTPUT_DIR, "rtp_synthesized_mixed_4B.jsonl")
 
 MAX_CONCURRENT_REQUESTS = 10
 BATCH_SIZE = 32

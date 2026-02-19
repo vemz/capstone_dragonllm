@@ -9,8 +9,11 @@ VLLM_API_KEY = "EMPTY"
 
 GUARD_MODEL = "Qwen/Qwen3Guard-Gen-8B"
 
-INPUT_FILE = "rtp_synthesized_mixed_4B.jsonl"
-OUTPUT_FINAL = "rtp_labeled_mixed.jsonl"
+SYNTHESIS_DIR = os.path.join(os.path.dirname(__file__), "results", "synthesis")
+LABELLING_DIR = os.path.join(os.path.dirname(__file__), "results", "labelling")
+os.makedirs(LABELLING_DIR, exist_ok=True)
+INPUT_FILE = os.path.join(SYNTHESIS_DIR, "rtp_synthesized_mixed_4B.jsonl")
+OUTPUT_FINAL = os.path.join(LABELLING_DIR, "rtp_labeled_mixed.jsonl")
 
 MAX_CONCURRENT_REQUESTS = 10
 TIMEOUT_SECONDS = 120
