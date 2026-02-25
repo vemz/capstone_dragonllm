@@ -3,10 +3,12 @@ from torch.utils.data import DataLoader
 from torch.optim import AdamW
 from transformers import AutoTokenizer
 from datasets import load_dataset
-from model import StreamGuardModel, Collator 
+from model import StreamGuardModel, Collator
 from tqdm import tqdm
 import wandb
 import os
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 MODEL_NAME = "Qwen/Qwen3-0.6B" 
 BATCH_SIZE = 32 
@@ -15,7 +17,7 @@ EPOCHS = 1
 MAX_LENGTH = 1024
 DTYPE = torch.bfloat16
 DEVICE = torch.device("cuda") if torch.cuda.is_available() else "cpu"
-TRAIN_FILE = "results/synthesis/rtp_synthesized_mixed_4B.jsonl"
+TRAIN_FILE = os.path.join(SCRIPT_DIR, "results", "synthesis", "rtp_synthesized_mixed_4B.jsonl")
 
 def main():
     wandb.init(project="qwen3guard-repro", config={"lr": LR, "epochs": EPOCHS, "batch_size": BATCH_SIZE})
@@ -30,11 +32,11 @@ def main():
     model.to(DEVICE)
 
     ds_train = load_dataset("json", data_files=TRAIN_FILE, split="train")
-    
+
     train_loader = DataLoader(
-        ds_train.shuffle(seed=42), 
+        ds_train,
         batch_size=BATCH_SIZE,
-        shuffle=True, 
+        shuffle=True,
         collate_fn=Collator(tokenizer, MAX_LENGTH),
         num_workers=4,  
         pin_memory=True
@@ -69,8 +71,8 @@ def main():
                 wandb.log({"loss": loss.item()})
                 progress_bar.set_postfix({"loss": f"{loss.item():.4f}"})
 
-    torch.save(model.head_q.state_dict(), "head_q.pth")
-    torch.save(model.head_r.state_dict(), "head_r.pth")
+    torch.save(model.head_q.state_dict(), os.path.join(SCRIPT_DIR, "head_q.pth"))
+    torch.save(model.head_r.state_dict(), os.path.join(SCRIPT_DIR, "head_r.pth"))
 
 if __name__ == "__main__":
     main()
