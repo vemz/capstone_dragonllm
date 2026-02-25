@@ -15,7 +15,7 @@ EPOCHS = 1
 MAX_LENGTH = 1024
 DTYPE = torch.bfloat16
 DEVICE = torch.device("cuda") if torch.cuda.is_available() else "cpu"
-TRAIN_FILE = "rtp_stream_labeled.jsonl" 
+TRAIN_FILE = "results/synthesis/rtp_synthesized_mixed_4B.jsonl"
 
 def main():
     wandb.init(project="qwen3guard-repro", config={"lr": LR, "epochs": EPOCHS, "batch_size": BATCH_SIZE})
