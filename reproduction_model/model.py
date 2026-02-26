@@ -66,6 +66,8 @@ class StreamGuardModel(nn.Module):
 
         return logits_q, logits_r, loss
 
+LABEL_MAP = {"Safe": 0, "Controversial": 1, "Unsafe": 2}
+
 class Collator:
     def __init__(self, tokenizer, max_length=1024):
         self.tokenizer = tokenizer
@@ -81,16 +83,16 @@ class Collator:
         labels_r_list = []
 
         for item in batch:
-            prompt = item['prompt']
-            response = item['response']
-            label_global = item['label'] 
-            unsafe_char_idx = item['unsafe_char_index']
+            prompt = item['user_query']
+            response = item['assistant_response']
+            label_global = LABEL_MAP.get(item.get('safety_label', 'Safe'), 0)
+            unsafe_token_idx = item.get('unsafe_token_index', -1)
 
             msgs = [
                 {"role": "user", "content": prompt},
                 {"role": "assistant", "content": response}
             ]
-            
+
             full_text = self.tokenizer.apply_chat_template(msgs, tokenize=False)
             encoding = self.tokenizer(
                 full_text,
@@ -106,34 +108,28 @@ class Collator:
             len_prompt_tokens = len(self.tokenizer(user_text, add_special_tokens=False).input_ids)
             sep_index = len_prompt_tokens - 1
 
-            labels_r_tensor = torch.full_like(input_ids, -100) 
+            labels_r_tensor = torch.full_like(input_ids, -100)
             seq_len = int(mask.sum())
-            
             start_gen = sep_index + 1
 
             if label_global == 0:
                 labels_r_tensor[start_gen : seq_len] = 0
             else:
-                if unsafe_char_idx == 0:
-                    labels_r_tensor[start_gen : seq_len] = 2
-                elif unsafe_char_idx > 0:
-                    safe_part_text = response[:unsafe_char_idx]
-                    len_safe_tokens = len(self.tokenizer(safe_part_text, add_special_tokens=False).input_ids)
-                    
-                    boundary_token_idx = start_gen + len_safe_tokens
-                    
+                if unsafe_token_idx <= 0:
+                    # boundary not found (-1) or first token is unsafe (0): full response is unsafe
+                    labels_r_tensor[start_gen : seq_len] = label_global
+                else:
+                    boundary_token_idx = start_gen + unsafe_token_idx
                     if boundary_token_idx < seq_len:
                         labels_r_tensor[start_gen : boundary_token_idx] = 0
-                    
-                    if boundary_token_idx < seq_len:
-                        labels_r_tensor[boundary_token_idx : seq_len] = 2
+                        labels_r_tensor[boundary_token_idx : seq_len] = label_global
                     else:
-                        labels_r_tensor[start_gen : seq_len] = 0 
+                        labels_r_tensor[start_gen : seq_len] = 0
 
             input_ids_list.append(input_ids)
             attention_mask_list.append(mask)
             sep_indices_list.append(sep_index)
-            labels_q_list.append(0) 
+            labels_q_list.append(label_global)
             labels_r_list.append(labels_r_tensor)
 
         return {
