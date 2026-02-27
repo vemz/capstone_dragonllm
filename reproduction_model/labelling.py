@@ -8,7 +8,7 @@ from tqdm.asyncio import tqdm
 VLLM_API_BASE = "http://localhost:8082/v1"
 VLLM_API_KEY = "EMPTY"
 
-GUARD_MODEL = "Qwen/Qwen3Guard-Gen-8B"
+GUARD_MODEL = "Qwen/Qwen3-4B-Instruct-2507"  # Model loaded on vLLM server
 
 SYNTHESIS_DIR = os.path.join(os.path.dirname(__file__), "results", "synthesis")
 LABELLING_DIR = os.path.join(os.path.dirname(__file__), "results", "labelling")
@@ -87,8 +87,7 @@ async def find_unsafe_token_idx_binary_search(item, guard_prompt_template):
                 model=GUARD_MODEL,
                 prompt=prompt,
                 temperature=0.0,
-                max_tokens=64,
-                stop=["\n\n", "\n<BEGIN"],
+                max_tokens=128,
                 timeout=TIMEOUT_SECONDS,
             )
         guard_output = response.choices[0].text.strip()
@@ -117,8 +116,7 @@ async def find_unsafe_token_idx_binary_search(item, guard_prompt_template):
                     model=GUARD_MODEL,
                     prompt=prompt,
                     temperature=0.0,
-                    max_tokens=64,
-                    stop=["\n\n", "\n<BEGIN"],
+                    max_tokens=128,
                     timeout=TIMEOUT_SECONDS,
                 )
             guard_output = response.choices[0].text.strip()
@@ -154,8 +152,7 @@ async def check_safety_single(item):
                 model=GUARD_MODEL,
                 prompt=prompt,
                 temperature=0.0,
-                max_tokens=64,
-                stop=["\n\n", "\n<BEGIN"],
+                max_tokens=128,
                 timeout=TIMEOUT_SECONDS,
             )
         guard_output = response.choices[0].text.strip()
