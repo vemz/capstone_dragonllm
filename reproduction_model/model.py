@@ -67,6 +67,7 @@ class StreamGuardModel(nn.Module):
         return logits_q, logits_r, loss
 
 LABEL_MAP = {"Safe": 0, "Controversial": 1, "Unsafe": 2}
+MODE_TO_LABEL = {"safe_attempt": 0, "toxic_attempt": 2}
 
 class Collator:
     def __init__(self, tokenizer, max_length=1024):
@@ -85,8 +86,15 @@ class Collator:
         for item in batch:
             prompt = item['user_query']
             response = item['assistant_response']
-            label_global = LABEL_MAP.get(item.get('safety_label', 'Safe'), 0)
-            unsafe_token_idx = item.get('unsafe_token_index', -1)
+
+            # Support both labelled format (safety_label) and raw format (intended_mode)
+            if 'safety_label' in item:
+                label_global = LABEL_MAP.get(item['safety_label'], 0)
+            else:
+                label_global = MODE_TO_LABEL.get(item.get('intended_mode', 'safe_attempt'), 0)
+
+            # Support both token_counter (raw) and unsafe_token_index (labelled)
+            unsafe_token_idx = item.get('token_counter', item.get('unsafe_token_index', -1))
 
             msgs = [
                 {"role": "user", "content": prompt},

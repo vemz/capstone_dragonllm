@@ -19,7 +19,7 @@ OUTPUT_FINAL = os.path.join(LABELLING_DIR, "rtp_labeled_mixed.jsonl")
 
 MAX_CONCURRENT_REQUESTS = 10
 BATCH_SIZE = 32 
-TIMEOUT_SECONDS = 120
+TIMEOUT_SECONDS = 600
 
 try:
     tokenizer = AutoTokenizer.from_pretrained(GUARD_MODEL)
@@ -184,13 +184,13 @@ async def data_annotation():
             except json.JSONDecodeError:
                 continue
 
-    # Select 30 random samples
+    # Select 1 random sample for testing
     total_items = len(items)
-    if total_items > 30:
-        items = random.sample(items, 30)
-        print(f"Selected 30 random samples out of {total_items} total items")
+    if total_items > 10:
+        items = random.sample(items, 10)
+        print(f"Selected 10 random samples out of {total_items} total items")
     else:
-        print(f"Processing all {total_items} items (less than 30)")
+        print(f"Processing all {total_items} items")
 
     with open(OUTPUT_FINAL, "w", encoding="utf-8") as fout:
         for i in tqdm(range(0, len(items), BATCH_SIZE), desc="Labelling", unit="batch"):

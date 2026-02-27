@@ -191,6 +191,12 @@ async def data_annotation():
             except json.JSONDecodeError:
                 continue
 
+    # Limit to 1 sample for testing
+    import random
+    if len(items) > 10:
+        items = random.sample(items, 10)
+        print(f"Selected 10 samples for testing out of {len(items)} total")
+
     with open(OUTPUT_FINAL, "w", encoding="utf-8") as fout:
         for i in tqdm(range(0, len(items), BATCH_SIZE), desc="Labelling", unit="batch"):
             batch = items[i:i+BATCH_SIZE]
