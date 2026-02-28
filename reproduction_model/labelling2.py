@@ -9,13 +9,13 @@ from tqdm.asyncio import tqdm
 VLLM_API_BASE = "http://localhost:8082/v1"
 VLLM_API_KEY = "EMPTY"
 
-GUARD_MODEL = "Qwen/Qwen3-4B-Instruct-2507"
+GUARD_MODEL = "Qwen/Qwen3-30B-A3B-Instruct-2507-FP8"
 
 SYNTHESIS_DIR = os.path.join(os.path.dirname(__file__), "results", "synthesis")
 LABELLING_DIR = os.path.join(os.path.dirname(__file__), "results", "labelling")
 os.makedirs(LABELLING_DIR, exist_ok=True)
 INPUT_FILE = os.path.join(SYNTHESIS_DIR, "rtp_synthesized_mixed_4B.jsonl")
-OUTPUT_FINAL = os.path.join(LABELLING_DIR, "rtp_labeled_mixed.jsonl")
+OUTPUT_FINAL = os.path.join(LABELLING_DIR, "rtp_labeled_mixed3.jsonl")
 
 MAX_CONCURRENT_REQUESTS = 10
 BATCH_SIZE = 32 
@@ -156,8 +156,13 @@ async def check_safety_single(item):
         safety_line, toxic_idx = parse_guard_output(normalized_output)
         is_unsafe = is_guard_unsafe(safety_line)
 
-        item["safety_label"] = "Unsafe" if is_unsafe else "Safe"
-        item["unsafe_token_index"] = toxic_idx if is_unsafe else -1
+        # Use intended_mode as ground truth label
+        if item["intended_mode"] == "toxic_attempt":
+            item["safety_label"] = "Unsafe"
+            item["unsafe_token_index"] = toxic_idx if toxic_idx > 0 else 0
+        else:
+            item["safety_label"] = "Safe"
+            item["unsafe_token_index"] = -1
         item["guard_raw_output"] = normalized_output
         item["guard_parsed_output"] = safety_line
         return item
@@ -186,9 +191,9 @@ async def data_annotation():
 
     # Select 1 random sample for testing
     total_items = len(items)
-    if total_items > 10:
-        items = random.sample(items, 10)
-        print(f"Selected 10 random samples out of {total_items} total items")
+    if total_items > 100:
+        items = random.sample(items, 100)
+        print(f"Selected 100 random samples out of {total_items} total items")
     else:
         print(f"Processing all {total_items} items")
 
