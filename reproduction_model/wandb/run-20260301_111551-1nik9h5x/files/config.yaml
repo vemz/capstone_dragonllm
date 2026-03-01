@@ -1,0 +1,67 @@
+_wandb:
+    value:
+        cli_version: 0.23.1
+        e:
+            altana1gdgsvxiyd3mk9qwtycwdj1qxr:
+                apple:
+                    ecpuCores: 6
+                    gpuCores: 8
+                    memoryGb: 16
+                    name: Apple M4
+                    pcpuCores: 4
+                    ramTotalBytes: "17179869184"
+                codePath: reproduction_model/train.py
+                codePathLocal: train.py
+                cpu_count: 10
+                cpu_count_logical: 10
+                disk:
+                    /:
+                        total: "245107195904"
+                        used: "238901481472"
+                email: alexis.bezacier@hotmail.fr
+                executable: /Users/alexisbezacier/miniconda3/bin/python
+                git:
+                    commit: c5baa86149c47304f0f335397f558a2ef3288ef8
+                    remote: https://github.com/vemz/capstone_dragonllm.git
+                host: MacBook-Air-de-Alexis-3.local
+                memory:
+                    total: "17179869184"
+                os: macOS-26.2-arm64-arm-64bit-Mach-O
+                program: /Users/alexisbezacier/Desktop/Bureau - MacBook Air de Alexis/capstone/capstone_dragonllm/reproduction_model/train.py
+                python: CPython 3.13.9
+                root: /Users/alexisbezacier/Desktop/Bureau - MacBook Air de Alexis/capstone/capstone_dragonllm/reproduction_model
+                startedAt: "2026-03-01T10:15:51.242385Z"
+                writerId: altana1gdgsvxiyd3mk9qwtycwdj1qxr
+        m: []
+        python_version: 3.13.9
+        t:
+            "1":
+                - 1
+                - 5
+                - 11
+                - 49
+                - 51
+                - 53
+                - 71
+            "2":
+                - 1
+                - 5
+                - 11
+                - 41
+                - 49
+                - 51
+                - 53
+                - 71
+            "3":
+                - 16
+            "4": 3.13.9
+            "5": 0.23.1
+            "6": 4.57.6
+            "12": 0.23.1
+            "13": darwin-arm64
+batch_size:
+    value: 32
+epochs:
+    value: 1
+lr:
+    value: 5e-05

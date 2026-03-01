@@ -1,0 +1,36 @@
+{
+  "os": "macOS-26.2-arm64-arm-64bit-Mach-O",
+  "python": "CPython 3.13.9",
+  "startedAt": "2026-03-01T10:15:51.242385Z",
+  "program": "/Users/alexisbezacier/Desktop/Bureau - MacBook Air de Alexis/capstone/capstone_dragonllm/reproduction_model/train.py",
+  "codePath": "reproduction_model/train.py",
+  "codePathLocal": "train.py",
+  "git": {
+    "remote": "https://github.com/vemz/capstone_dragonllm.git",
+    "commit": "c5baa86149c47304f0f335397f558a2ef3288ef8"
+  },
+  "email": "alexis.bezacier@hotmail.fr",
+  "root": "/Users/alexisbezacier/Desktop/Bureau - MacBook Air de Alexis/capstone/capstone_dragonllm/reproduction_model",
+  "host": "MacBook-Air-de-Alexis-3.local",
+  "executable": "/Users/alexisbezacier/miniconda3/bin/python",
+  "cpu_count": 10,
+  "cpu_count_logical": 10,
+  "disk": {
+    "/": {
+      "total": "245107195904",
+      "used": "238901481472"
+    }
+  },
+  "memory": {
+    "total": "17179869184"
+  },
+  "apple": {
+    "name": "Apple M4",
+    "ecpuCores": 6,
+    "pcpuCores": 4,
+    "gpuCores": 8,
+    "memoryGb": 16,
+    "ramTotalBytes": "17179869184"
+  },
+  "writerId": "altana1gdgsvxiyd3mk9qwtycwdj1qxr"
+}

@@ -11,13 +11,13 @@ import os
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 MODEL_NAME = "Qwen/Qwen3-0.6B" 
-BATCH_SIZE = 32 
-LR = 5e-5 
-EPOCHS = 1 
+BATCH_SIZE = 64      # L40S 48 GB VRAM
+LR = 5e-5
+EPOCHS = 3
 MAX_LENGTH = 1024
 DTYPE = torch.bfloat16
 DEVICE = torch.device("cuda") if torch.cuda.is_available() else "cpu"
-TRAIN_FILE = os.path.join(SCRIPT_DIR, "results", "synthesis", "rtp_synthesized_mixed_4B.jsonl")
+TRAIN_FILE = os.path.join(SCRIPT_DIR, "results", "labelling", "rtp_labeled_mixed_25K_cleaned.jsonl")
 
 def main():
     wandb.init(project="qwen3guard-repro", config={"lr": LR, "epochs": EPOCHS, "batch_size": BATCH_SIZE})
@@ -38,8 +38,9 @@ def main():
         batch_size=BATCH_SIZE,
         shuffle=True,
         collate_fn=Collator(tokenizer, MAX_LENGTH),
-        num_workers=4,  
-        pin_memory=True
+        num_workers=8,
+        persistent_workers=True,
+        pin_memory=torch.cuda.is_available()
     )
 
     optimizer = AdamW([
@@ -62,7 +63,7 @@ def main():
 
             optimizer.zero_grad(set_to_none=True)
             
-            with torch.amp.autocast('cuda', dtype=DTYPE):
+            with torch.amp.autocast(DEVICE.type, dtype=DTYPE):
                 _, _, loss = model(input_ids, attention_mask, labels_q, labels_r, sep_indices)
             
             if loss is not None:
