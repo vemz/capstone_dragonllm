@@ -13,7 +13,7 @@ import sys
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_NAME = "Qwen/Qwen3-0.6B"
-HEAD_R_PATH = os.path.join(SCRIPT_DIR, "head_r.pth")
+HEAD_R_PATH = os.path.join(SCRIPT_DIR, "head_r_new.pth")
 DEVICE = "mps" if torch.backends.mps.is_available() else "cpu"
 DTYPE = torch.float32  # MPS/CPU — pas de bfloat16
 MAX_NEW_TOKENS = 200
