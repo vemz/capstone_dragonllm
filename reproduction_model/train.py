@@ -11,13 +11,13 @@ import os
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 MODEL_NAME = "Qwen/Qwen3-0.6B" 
-BATCH_SIZE = 32 
-LR = 5e-5 
-EPOCHS = 1 
+BATCH_SIZE = 64      # L40S 48 GB VRAM
+LR = 5e-5
+EPOCHS = 3
 MAX_LENGTH = 1024
 DTYPE = torch.bfloat16
 DEVICE = torch.device("cuda") if torch.cuda.is_available() else "cpu"
-TRAIN_FILE = os.path.join(SCRIPT_DIR, "results", "synthesis", "rtp_synthesized_mixed_4B.jsonl")
+TRAIN_FILE = os.path.join(SCRIPT_DIR, "results", "labelling", "rtp_labeled_mixed_25K_cleaned.jsonl")
 
 def main():
     wandb.init(project="qwen3guard-repro", config={"lr": LR, "epochs": EPOCHS, "batch_size": BATCH_SIZE})
@@ -38,12 +38,12 @@ def main():
         batch_size=BATCH_SIZE,
         shuffle=True,
         collate_fn=Collator(tokenizer, MAX_LENGTH),
-        num_workers=4,  
-        pin_memory=True
+        num_workers=8,
+        persistent_workers=True,
+        pin_memory=torch.cuda.is_available()
     )
 
     optimizer = AdamW([
-        {'params': model.head_q.parameters()}, 
         {'params': model.head_r.parameters()}
     ], lr=LR)
 
@@ -56,14 +56,12 @@ def main():
             step += 1
             input_ids = batch['input_ids'].to(DEVICE, non_blocking=True)
             attention_mask = batch['attention_mask'].to(DEVICE, non_blocking=True)
-            sep_indices = batch['sep_indices'].to(DEVICE, non_blocking=True)
-            labels_q = batch['labels_q'].to(DEVICE, non_blocking=True)
             labels_r = batch['labels_r'].to(DEVICE, non_blocking=True)
 
             optimizer.zero_grad(set_to_none=True)
             
-            with torch.amp.autocast('cuda', dtype=DTYPE):
-                _, _, loss = model(input_ids, attention_mask, labels_q, labels_r, sep_indices)
+            with torch.amp.autocast(DEVICE.type, dtype=DTYPE):
+                _, loss = model(input_ids, attention_mask, labels_r)
             
             if loss is not None:
                 loss.backward() 
@@ -71,7 +69,6 @@ def main():
                 wandb.log({"loss": loss.item()})
                 progress_bar.set_postfix({"loss": f"{loss.item():.4f}"})
 
-    torch.save(model.head_q.state_dict(), os.path.join(SCRIPT_DIR, "head_q.pth"))
     torch.save(model.head_r.state_dict(), os.path.join(SCRIPT_DIR, "head_r.pth"))
 
 if __name__ == "__main__":
