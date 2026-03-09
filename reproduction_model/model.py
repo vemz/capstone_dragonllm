@@ -76,12 +76,9 @@ class Collator:
             label_global = LABEL_MAP.get(item.get('safety_label', 'Safe'), 0)
             unsafe_token_idx = item.get('unsafe_token_index', -1)
 
-            msgs = [
-                {"role": "user", "content": prompt},
-                {"role": "assistant", "content": response}
-            ]
+            user_part = f"User: {prompt}\nAssistant:"
+            full_text = f"{user_part} {response}"
 
-            full_text = self.tokenizer.apply_chat_template(msgs, tokenize=False)
             encoding = self.tokenizer(
                 full_text,
                 max_length=self.max_length,
@@ -92,8 +89,7 @@ class Collator:
             input_ids = encoding.input_ids[0]
             mask = encoding.attention_mask[0]
 
-            user_text = self.tokenizer.apply_chat_template([msgs[0]], tokenize=False, add_generation_prompt=True)
-            len_prompt_tokens = len(self.tokenizer(user_text, add_special_tokens=False).input_ids)
+            len_prompt_tokens = len(self.tokenizer(user_part, add_special_tokens=False).input_ids)
             sep_index = len_prompt_tokens - 1
 
             labels_r_tensor = torch.full_like(input_ids, -100)

@@ -10,7 +10,7 @@ import os
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-MODEL_NAME = "Qwen/Qwen3-0.6B" 
+MODEL_NAME = "Qwen/Qwen3-0.6B-Base" 
 BATCH_SIZE = 64      # L40S 48 GB VRAM
 LR = 5e-5
 EPOCHS = 3
