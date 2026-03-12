@@ -12,7 +12,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 MODEL_NAME = "Qwen/Qwen3-0.6B-Base" 
 BATCH_SIZE = 64      # L40S 48 GB VRAM
-LR = 5e-5
+LR = 2e-6
 EPOCHS = 3
 MAX_LENGTH = 1024
 DTYPE = torch.bfloat16
