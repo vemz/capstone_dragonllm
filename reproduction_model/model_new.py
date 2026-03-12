@@ -7,10 +7,10 @@ import torch.nn.functional as F
 class SafetyHead(nn.Module):
     def __init__(self, hidden_size, num_classes=3):
         super().__init__()
-        self.W_pre     = nn.Linear(hidden_size, hidden_size)
-        self.act       = nn.GELU()                           # FIX 1: non-linéarité
+        self.W_pre      = nn.Linear(hidden_size, hidden_size)
+        self.act        = nn.GELU()
         self.layer_norm = nn.LayerNorm(hidden_size)
-        self.W_risk    = nn.Linear(hidden_size, num_classes)
+        self.W_risk     = nn.Linear(hidden_size, num_classes)
 
         nn.init.normal_(self.W_pre.weight, std=0.02)
         nn.init.zeros_(self.W_pre.bias)
@@ -18,7 +18,7 @@ class SafetyHead(nn.Module):
         nn.init.zeros_(self.W_risk.bias)
 
     def forward(self, h):
-        x = self.act(self.W_pre(h))   # GELU avant LayerNorm
+        x = self.act(self.W_pre(h))
         x = self.layer_norm(x)
         return self.W_risk(x)
 
@@ -27,9 +27,13 @@ class StreamGuardModel(nn.Module):
     def __init__(self, model_name, num_classes=3, n_layers=4, loss_r_weight=2.0):
         super().__init__()
         self.n_layers      = n_layers
-        self.loss_r_weight = loss_r_weight                   # FIX 2: pondération loss_r
+        self.loss_r_weight = loss_r_weight
 
-        self.backbone = AutoModelForCausalLM.from_pretrained(model_name)
+        self.backbone = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            dtype=torch.bfloat16,
+            low_cpu_mem_usage=True,
+        )
         for param in self.backbone.parameters():
             param.requires_grad = False
 
@@ -37,7 +41,7 @@ class StreamGuardModel(nn.Module):
         self.head_q = SafetyHead(hidden_size, num_classes)
         self.head_r = SafetyHead(hidden_size, num_classes)
 
-        # FIX 3: poids de classe — Safe légèrement surpondéré pour freiner la sur-prédiction Unsafe
+        # Safe légèrement surpondéré pour freiner la sur-prédiction Unsafe
         self.register_buffer(
             "token_weights", torch.tensor([1.2, 1.0, 1.0])
         )
@@ -52,7 +56,7 @@ class StreamGuardModel(nn.Module):
                 output_hidden_states=True,
             )
 
-        # FIX 4: moyenne des n_layers dernières couches
+        # Moyenne des n_layers dernières couches
         h = torch.stack(outputs.hidden_states[-self.n_layers:]).mean(dim=0)
 
         logits_q = self.head_q(h)
@@ -67,7 +71,7 @@ class StreamGuardModel(nn.Module):
             loss_r = F.cross_entropy(
                 logits_r.view(-1, logits_r.size(-1)),
                 labels_r.view(-1),
-                weight=self.token_weights,
+                weight=self.token_weights.to(logits_r.dtype),
                 ignore_index=-100,
             )
 
@@ -76,7 +80,7 @@ class StreamGuardModel(nn.Module):
         return logits_q, logits_r, loss
 
 
-# ── Collator & LABEL_MAP (inchangés) ─────────────────────────────────────────
+# ── Collator & LABEL_MAP ──────────────────────────────────────────────────────
 LABEL_MAP = {"Safe": 0, "Controversial": 1, "Unsafe": 2}
 
 from transformers import AutoTokenizer   # noqa: E402
@@ -95,7 +99,7 @@ class Collator:
         for item in batch:
             prompt   = item["user_query"]
             response = item["assistant_response"]
-            label_global    = LABEL_MAP.get(item.get("safety_label", "Safe"), 0)
+            label_global     = LABEL_MAP.get(item.get("safety_label", "Safe"), 0)
             unsafe_token_idx = item.get("unsafe_token_index", -1)
 
             msgs = [
@@ -111,9 +115,9 @@ class Collator:
             input_ids = encoding.input_ids[0]
             mask      = encoding.attention_mask[0]
 
-            user_text        = self.tokenizer.apply_chat_template([msgs[0]], tokenize=False, add_generation_prompt=True)
+            user_text         = self.tokenizer.apply_chat_template([msgs[0]], tokenize=False, add_generation_prompt=True)
             len_prompt_tokens = len(self.tokenizer(user_text, add_special_tokens=False).input_ids)
-            sep_index        = len_prompt_tokens - 1
+            sep_index         = len_prompt_tokens - 1
 
             labels_r_tensor = torch.full_like(input_ids, -100)
             seq_len   = int(mask.sum())
@@ -127,8 +131,8 @@ class Collator:
                 else:
                     boundary = start_gen + unsafe_token_idx
                     if boundary < seq_len:
-                        labels_r_tensor[start_gen:boundary]  = 0
-                        labels_r_tensor[boundary:seq_len]    = label_global
+                        labels_r_tensor[start_gen:boundary] = 0
+                        labels_r_tensor[boundary:seq_len]   = label_global
                     else:
                         labels_r_tensor[start_gen:seq_len] = 0
 

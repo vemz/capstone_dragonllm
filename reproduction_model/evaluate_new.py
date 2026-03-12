@@ -1,15 +1,10 @@
 """
-Evaluate trained classification heads.
+Evaluate NEW classification heads (model_new) on the held-out test set (last 20%).
 
 Usage:
-  # Quick sanity check on a few hardcoded examples
-  python evaluate.py --mode demo
-
-  # Metrics on the labeled dataset (both heads)
-  python evaluate.py --mode eval --data results/labelling/rtp_labeled_mixed_25K_cleaned.jsonl
-
-  # Metrics on the first N items only
-  python evaluate.py --mode eval --limit 500
+  python evaluate_new.py --mode demo
+  python evaluate_new.py --mode eval            # test set complet (~4700 items)
+  python evaluate_new.py --mode eval --limit 500
 """
 import argparse
 import json
@@ -24,10 +19,11 @@ from model_new import StreamGuardModel, Collator, LABEL_MAP
 
 SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
 MODEL_NAME  = "Qwen/Qwen3-0.6B"
-HEAD_Q_PATH = os.path.join(SCRIPT_DIR, "head_q_new.pth")
-HEAD_R_PATH = os.path.join(SCRIPT_DIR, "head_r_new.pth")
 MAX_LENGTH  = 1024
 BATCH_SIZE  = 32
+TRAIN_RATIO = 0.70   # doit correspondre à train_new.py
+VAL_RATIO   = 0.10
+# test = derniers 20% (= 1 - TRAIN_RATIO - VAL_RATIO)
 
 ID2LABEL = {v: k for k, v in LABEL_MAP.items()}   # 0→Safe, 1→Controversial, 2→Unsafe
 UNSAFE   = LABEL_MAP["Unsafe"]                      # 2
@@ -62,13 +58,16 @@ DEMO_EXAMPLES = [
 
 
 # ── Model loading ─────────────────────────────────────────────────────────────
-def load_model():
+def load_model(best=True):
+    suffix = "_best" if best else ""
+    head_q_path = os.path.join(SCRIPT_DIR, f"head_q_new{suffix}.pth")
+    head_r_path = os.path.join(SCRIPT_DIR, f"head_r_new{suffix}.pth")
     print(f"Loading backbone: {MODEL_NAME}")
     model = StreamGuardModel(MODEL_NAME, n_layers=4, loss_r_weight=2.0)
     model.backbone.to(torch.bfloat16)
-    print(f"Loading heads from {SCRIPT_DIR}/")
-    model.head_q.load_state_dict(torch.load(HEAD_Q_PATH, map_location="cpu"))
-    model.head_r.load_state_dict(torch.load(HEAD_R_PATH, map_location="cpu"))
+    print(f"Loading heads: {os.path.basename(head_q_path)}, {os.path.basename(head_r_path)}")
+    model.head_q.load_state_dict(torch.load(head_q_path, map_location="cpu"))
+    model.head_r.load_state_dict(torch.load(head_r_path, map_location="cpu"))
     model.to(DEVICE)
     model.eval()
     return model
@@ -147,18 +146,26 @@ def run_demo(model, tokenizer):
 
 # ── Eval mode ─────────────────────────────────────────────────────────────────
 def run_eval(model, tokenizer, data_path, limit=None):
-    items = []
+    all_items = []
     with open(data_path, "r", encoding="utf-8") as f:
         for line in f:
             try:
-                items.append(json.loads(line))
+                all_items.append(json.loads(line))
             except json.JSONDecodeError:
                 continue
+
+    # Test set = derniers 20%, identique au split de train_new.py (70/10/20)
+    n       = len(all_items)
+    n_train = int(n * TRAIN_RATIO)
+    n_val   = int(n * VAL_RATIO)
+    items   = all_items[n_train + n_val:]
+
     if limit:
         items = items[:limit]
 
     items = [it for it in items if it.get("safety_label") in LABEL_MAP]
-    print(f"Evaluating on {len(items)} items from {os.path.basename(data_path)}")
+    test_ratio = 1 - TRAIN_RATIO - VAL_RATIO
+    print(f"Evaluating on {len(items)} test items (last {test_ratio:.0%} of {n}) from {os.path.basename(data_path)}")
 
     collator = Collator(tokenizer, MAX_LENGTH)
 
@@ -259,10 +266,11 @@ def main():
     parser.add_argument("--data",  default=os.path.join(SCRIPT_DIR, "results", "labelling",
                                                          "rtp_labeled_mixed_25K_cleaned.jsonl"))
     parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--last",  action="store_true", help="Load last epoch checkpoint instead of best")
     args = parser.parse_args()
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-    model     = load_model()
+    model     = load_model(best=not args.last)
 
     if args.mode == "demo":
         run_demo(model, tokenizer)
