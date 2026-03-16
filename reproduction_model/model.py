@@ -43,7 +43,9 @@ class StreamGuardModel(nn.Module):
                 output_hidden_states=True
             )
 
-        h = torch.stack(outputs.hidden_states[-4:]).mean(dim=0)
+        # h = outputs.hidden_states[-1]
+        # try with the sum of the average of all the layers / the last 4 layers
+        h = sum(outputs.hidden_states[-4:]) / 4
         
         logits_r = self.head_r(h)
 
