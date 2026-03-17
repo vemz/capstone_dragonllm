@@ -43,9 +43,9 @@ class StreamGuardModel(nn.Module):
                 output_hidden_states=True
             )
 
-        # h = outputs.hidden_states[-1]
+        h = outputs.hidden_states[-1]
         # try with the sum of the average of all the layers / the last 4 layers
-        h = sum(outputs.hidden_states[-4:]) / 4
+        # h = sum(outputs.hidden_states[-4:]) / 4
         
         logits_r = self.head_r(h)
 
