@@ -1,7 +1,6 @@
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 class SafetyHead(nn.Module):
     def __init__(self, hidden_size, num_classes=2): 
@@ -16,9 +15,10 @@ class SafetyHead(nn.Module):
         nn.init.zeros_(self.W_risk.bias)
 
     def forward(self, h):
-        x = F.gelu(self.W_pre(h))
-        x = self.layer_norm(x)
-        return self.W_risk(x)
+        pre_output = self.W_pre(h)
+        x = self.layer_norm(pre_output)
+        y_risk = self.W_risk(x)
+        return y_risk
 
 class StreamGuardModel(nn.Module):
     def __init__(self, model_name, num_classes=2):
