@@ -13,7 +13,6 @@ from model import SafetyHead
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_NAME = "Qwen/Qwen3-0.6B-Base"
 HEAD_PATH = os.path.join(SCRIPT_DIR, "head_r.pth")
-BACKBONE_FT_PATH = os.path.join(SCRIPT_DIR, "backbone_finetuned.pth")
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
 DTYPE = torch.bfloat16
@@ -78,30 +77,20 @@ def load_guardtest_split(dataset_name: str, split: str) -> Dataset:
 			return ds[split]
 		for candidate in ("test", "validation", "train"):
 			if candidate in ds:
-				print(f"Split '{split}' introuvable, fallback vers '{candidate}'.")
 				return ds[candidate]
 		first_split = next(iter(ds.keys()))
-		print(f"Split '{split}' introuvable, fallback vers '{first_split}'.")
 		return ds[first_split]
 	if isinstance(ds, Dataset):
 		return ds
 	raise ValueError("Format de dataset inattendu.")
 
 
-def load_model(head_path: str, backbone_ft_path: str = ""):
+def load_model(head_path: str):
 	tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 	if tokenizer.pad_token is None:
 		tokenizer.pad_token = tokenizer.eos_token
 
-	print(f"Loading backbone: {MODEL_NAME}")
 	backbone = AutoModelForCausalLM.from_pretrained(MODEL_NAME, torch_dtype=DTYPE)
-
-	if backbone_ft_path and os.path.exists(backbone_ft_path):
-		ft_state = torch.load(backbone_ft_path, map_location=DEVICE, weights_only=True)
-		backbone.load_state_dict(ft_state, strict=False)
-		print(f"Loaded {len(ft_state)} fine-tuned backbone tensors")
-	elif backbone_ft_path:
-		print(f"Backbone FT introuvable: {backbone_ft_path} (on continue sans)")
 
 	backbone.to(DEVICE)
 	backbone.eval()
@@ -203,7 +192,7 @@ def run_eval(args):
 		ds = ds.select(range(min(args.limit, len(ds))))
 
 	print(f"Samples a evaluer: {len(ds)}")
-	tokenizer, backbone, head_r = load_model(args.head, args.backbone_ft)
+	tokenizer, backbone, head_r = load_model(args.head)
 
 	y_true: List[int] = []
 	y_pred: List[int] = []
@@ -273,7 +262,6 @@ def run_eval(args):
 	print()
 
 	if not y_true:
-		print("Aucun sample evalue apres filtrage. Essaie --require-input-ids false ou un autre split.")
 		return
 
 	print("\n" + "=" * 60)
@@ -337,7 +325,6 @@ def main():
 	parser.add_argument("--dataset", default="Qwen/Qwen3GuardTest")
 	parser.add_argument("--split", default="thinking_loc")
 	parser.add_argument("--head", default=HEAD_PATH)
-	parser.add_argument("--backbone-ft", default=BACKBONE_FT_PATH)
 	parser.add_argument("--max-length", type=int, default=1024)
 	parser.add_argument("--limit", type=int, default=None)
 	parser.add_argument("--show-examples", type=int, default=5)

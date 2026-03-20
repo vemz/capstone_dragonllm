@@ -10,10 +10,10 @@ import os
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-MODEL_NAME = "Qwen/Qwen3-0.6B-Base" 
-BATCH_SIZE = 64      # L40S 48 GB VRAM
-LR = 2e-6
-EPOCHS = 3
+MODEL_NAME = "Qwen/Qwen3-4B-Base"
+BATCH_SIZE = 16      
+LR = 1.5e-6
+EPOCHS = 5
 MAX_LENGTH = 1024
 LOGGING_STEPS = 10
 DTYPE = torch.bfloat16
@@ -21,7 +21,15 @@ DEVICE = torch.device("cuda") if torch.cuda.is_available() else "cpu"
 TRAIN_FILE = os.path.join(SCRIPT_DIR, "results", "labelling", "rtp_labeled_mixed_25K_cleaned.jsonl")
 
 def main():
-    wandb.init(project="qwen3guard-repro", config={"lr": LR, "epochs": EPOCHS, "batch_size": BATCH_SIZE})
+    wandb.init(
+        project="qwen3guard-repro",
+        config={
+            "model_name": MODEL_NAME,
+            "lr": LR,
+            "epochs": EPOCHS,
+            "batch_size": BATCH_SIZE,
+        },
+    )
     torch.set_float32_matmul_precision('high')
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
@@ -67,6 +75,7 @@ def main():
             if loss is not None:
                 loss.backward() 
                 optimizer.step()
+
                 if step % LOGGING_STEPS == 0:
                     wandb.log({"loss": loss.item()}, step=step)
                 progress_bar.set_postfix({"loss": f"{loss.item():.4f}"})
