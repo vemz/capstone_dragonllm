@@ -80,7 +80,7 @@ def main():
                     wandb.log({"loss": loss.item()}, step=step)
                 progress_bar.set_postfix({"loss": f"{loss.item():.4f}"})
 
-    torch.save(model.head_r.state_dict(), os.path.join(SCRIPT_DIR, "head_r.pth"))
+    torch.save(model.head_r.state_dict(), os.path.join(SCRIPT_DIR, "head_r2.pth"))
 
 if __name__ == "__main__":
     main()
