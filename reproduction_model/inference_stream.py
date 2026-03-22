@@ -4,12 +4,19 @@ from model import SafetyHead
 import os
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-MODEL_NAME = "Qwen/Qwen3-0.6B-Base"
-HEAD_PATH = os.path.join(SCRIPT_DIR, "head_r.pth")
-BACKBONE_FT_PATH = os.path.join(SCRIPT_DIR, "backbone_finetuned.pth")
+MODEL_NAME = "Qwen/Qwen3-4B-Base"
+HEAD_PATH = os.path.join(SCRIPT_DIR, "head_r2.pth")
 DTYPE = torch.bfloat16
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 LABEL_NAMES = {0: "Safe", 1: "Unsafe"}
+
+
+def is_turn_marker_suffix(text):
+    stripped = text.rstrip()
+    if "\n" not in stripped:
+        return False
+    last_line = stripped.split("\n")[-1].strip()
+    return last_line in {"User:", "Assistant:", "User", "Assistant"}
 
 
 def load_model():
@@ -18,12 +25,6 @@ def load_model():
         tokenizer.pad_token = tokenizer.eos_token
 
     backbone = AutoModelForCausalLM.from_pretrained(MODEL_NAME, torch_dtype=DTYPE)
-
-    # Load fine-tuned backbone layers if available
-    if os.path.exists(BACKBONE_FT_PATH):
-        ft_state = torch.load(BACKBONE_FT_PATH, map_location=DEVICE, weights_only=True)
-        backbone.load_state_dict(ft_state, strict=False)
-        print(f"Loaded {len(ft_state)} fine-tuned backbone tensors")
 
     backbone.eval()
     backbone.to(DEVICE)
@@ -38,14 +39,11 @@ def load_model():
 
 
 def stream_generate(tokenizer, backbone, head_r, user_query, max_new_tokens=256):
-    """
-    The backbone generates the response token by token. At each step,
-    head_r classifies the token as Safe/Unsafe. Stops on first unsafe or EOS.
-    """
     prompt_text = f"User: {user_query}\nAssistant:"
     input_ids = tokenizer(prompt_text, return_tensors="pt", add_special_tokens=False).input_ids.to(DEVICE)
 
     results = []
+    generated_token_ids = []
     past_key_values = None
 
     print(f"\n{'='*60}")
@@ -63,11 +61,9 @@ def stream_generate(tokenizer, backbone, head_r, user_query, max_new_tokens=256)
             )
             past_key_values = outputs.past_key_values
 
-            # Get next token via greedy decoding
             next_token_logits = outputs.logits[:, -1, :]
             next_token_id = torch.argmax(next_token_logits, dim=-1, keepdim=True)
 
-            # Classify with head_r
             h_last = outputs.hidden_states[-1][:, -1, :]
             safety_logits = head_r(h_last)
             probs = torch.softmax(safety_logits, dim=-1)
@@ -75,6 +71,11 @@ def stream_generate(tokenizer, backbone, head_r, user_query, max_new_tokens=256)
             confidence = probs[0, pred].item()
 
         token_text = tokenizer.decode(next_token_id[0])
+
+        candidate_text = tokenizer.decode(generated_token_ids + [int(next_token_id.item())], skip_special_tokens=True)
+        if is_turn_marker_suffix(candidate_text):
+            break
+
         label = LABEL_NAMES[pred]
 
         color = "\033[92m" if pred == 0 else "\033[91m"
@@ -90,17 +91,15 @@ def stream_generate(tokenizer, backbone, head_r, user_query, max_new_tokens=256)
             "prob_unsafe": probs[0, 1].item(),
         })
 
-        # Stop on EOS
         if next_token_id.item() == tokenizer.eos_token_id:
             break
 
-        # Stop on first unsafe token
         if pred == 1:
             print(f"\n\n{color}[UNSAFE DETECTED at token {i}: \"{token_text}\" "
                   f"(confidence: {confidence:.2%})]{reset}")
             break
 
-        # Next iteration: feed only the new token (KV cache handles the rest)
+        generated_token_ids.append(int(next_token_id.item()))
         input_ids = next_token_id
 
     print("\n")
