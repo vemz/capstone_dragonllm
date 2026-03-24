@@ -11,8 +11,8 @@ from model import SafetyHead
 
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-MODEL_NAME = "Qwen/Qwen3-0.6B-Base"
-HEAD_PATH = os.path.join(SCRIPT_DIR, "head_r.pth")
+MODEL_NAME = "Qwen/Qwen3-4B-Base"
+HEAD_PATH = os.path.join(SCRIPT_DIR, "head_r2.pth")
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
 DTYPE = torch.bfloat16
@@ -82,7 +82,7 @@ def load_guardtest_split(dataset_name: str, split: str) -> Dataset:
 		return ds[first_split]
 	if isinstance(ds, Dataset):
 		return ds
-	raise ValueError("Format de dataset inattendu.")
+	raise ValueError("Unexpected dataset format.")
 
 
 def load_model(head_path: str):
@@ -191,7 +191,7 @@ def run_eval(args):
 	if args.limit is not None:
 		ds = ds.select(range(min(args.limit, len(ds))))
 
-	print(f"Samples a evaluer: {len(ds)}")
+	print(f"Samples to evaluate: {len(ds)}")
 	tokenizer, backbone, head_r = load_model(args.head)
 
 	y_true: List[int] = []
@@ -264,12 +264,10 @@ def run_eval(args):
 	if not y_true:
 		return
 
-	print("\n" + "=" * 60)
 	print("Sample-level metrics (Safe vs Unsafe)")
-	print("=" * 60)
-	print(f"Mode alignement: dataset input_ids={used_dataset_input_ids}, fallback re-tokenization={fallback_text_retokenized}")
+	print(f"Alignment mode: dataset input_ids={used_dataset_input_ids}, fallback re-tokenization={fallback_text_retokenized}")
 	if skipped_missing_input_ids > 0:
-		print(f"Samples ignores (input_ids manquants): {skipped_missing_input_ids}")
+		print(f"Ignored samples (missing input_ids): {skipped_missing_input_ids}")
 	print(
 		classification_report(
 			y_true,
@@ -285,9 +283,7 @@ def run_eval(args):
 	print(f"Safe    {cm[0,0]:>8} {cm[0,1]:>9}")
 	print(f"Unsafe  {cm[1,0]:>8} {cm[1,1]:>9}")
 
-	print("\n" + "=" * 60)
 	print("Unsafe boundary metrics (unsafe_start_index)")
-	print("=" * 60)
 	if boundary_true:
 		bt = torch.tensor(boundary_true, dtype=torch.float32)
 		bp = torch.tensor(boundary_pred, dtype=torch.float32)
@@ -304,18 +300,18 @@ def run_eval(args):
 			mae_detected = float("nan")
 			within5 = 0.0
 
-		print(f"Unsafe avec gt index valide       : {n_total}")
-		print(f"Detectes (pred >= 0)             : {n_detected} ({n_detected/n_total:.1%})")
-		print(f"Manques (pred = -1)              : {boundary_missed} ({boundary_missed/n_total:.1%})")
+		print(f"Unsafe with valid gt index       : {n_total}")
+		print(f"Detected (pred >= 0)             : {n_detected} ({n_detected/n_total:.1%})")
+		print(f"Missed (pred = -1)               : {boundary_missed} ({boundary_missed/n_total:.1%})")
 		print(f"MAE (all)                        : {mae_all:.2f} tokens")
 		print(f"MAE (detected only)              : {mae_detected:.2f} tokens")
 		print(f"Within +/-5 tokens (detected)    : {within5:.1%}")
-		print(f"Skips pour troncature max_length : {boundary_truncated}")
+		print(f"Skipped due to max_length truncation: {boundary_truncated}")
 	else:
-		print("Aucun exemple Unsafe avec unsafe_start_index exploitable.")
+		print("No Unsafe examples with a usable unsafe_start_index.")
 
 	if examples:
-		print("\nExemples de mismatches:")
+		print("\nMismatch examples:")
 		for line in examples:
 			print(f"  - {line}")
 
@@ -331,7 +327,7 @@ def main():
 	parser.add_argument(
 		"--require-input-ids",
 		action="store_true",
-		help="Ignore les samples sans input_ids du dataset (evaluation strictement alignee).",
+		help="Ignore samples without dataset input_ids (strict alignment evaluation).",
 	)
 	args = parser.parse_args()
 
