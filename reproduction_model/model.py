@@ -21,9 +21,11 @@ class SafetyHead(nn.Module):
         return y_risk
 
 class StreamGuardModel(nn.Module):
-    def __init__(self, model_name, num_classes=2):
+    def __init__(self, model_name, num_classes=2, backbone_kwargs=None):
         super().__init__()
-        self.backbone = AutoModelForCausalLM.from_pretrained(model_name)
+        if backbone_kwargs is None:
+            backbone_kwargs = {}
+        self.backbone = AutoModelForCausalLM.from_pretrained(model_name, **backbone_kwargs)
         
         for param in self.backbone.parameters():
             param.requires_grad = False
