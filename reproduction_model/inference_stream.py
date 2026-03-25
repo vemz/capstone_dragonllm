@@ -89,7 +89,7 @@ def stream_generate(
         should_block = prob_unsafe >= unsafe_confidence_threshold
         label = LABEL_NAMES[pred]
 
-        color = "\033[92m" if pred == 0 else "\033[91m"
+        color = "\033[91m" if should_block else "\033[92m"
         reset = "\033[0m"
         print(f"{color}{token_text}{reset}", end="", flush=True)
 
