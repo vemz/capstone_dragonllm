@@ -7,7 +7,8 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_NAME = "Qwen/Qwen3-4B-Base"
 HEAD_PATH = os.path.join(SCRIPT_DIR, "head_r2.pth")
 DTYPE = torch.bfloat16
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
+print(f"Using device: {DEVICE}")
 LABEL_NAMES = {0: "Safe", 1: "Unsafe"}
 
 
@@ -66,9 +67,8 @@ def stream_generate(tokenizer, backbone, head_r, user_query, max_new_tokens=256)
 
             h_last = outputs.hidden_states[-1][:, -1, :]
             safety_logits = head_r(h_last)
-            probs = torch.softmax(safety_logits, dim=-1)
-            pred = torch.argmax(probs, dim=-1).item()
-            confidence = probs[0, pred].item()
+            pred = torch.argmax(safety_logits, dim=-1).item()
+            confidence = torch.softmax(safety_logits, dim=-1)[0, pred].item()
 
         token_text = tokenizer.decode(next_token_id[0])
 
@@ -87,8 +87,8 @@ def stream_generate(tokenizer, backbone, head_r, user_query, max_new_tokens=256)
             "token": token_text,
             "label": label,
             "confidence": confidence,
-            "prob_safe": probs[0, 0].item(),
-            "prob_unsafe": probs[0, 1].item(),
+            "prob_safe": torch.softmax(safety_logits, dim=-1)[0, 0].item(),
+            "prob_unsafe": torch.softmax(safety_logits, dim=-1)[0, 1].item(),
         })
 
         if next_token_id.item() == tokenizer.eos_token_id:

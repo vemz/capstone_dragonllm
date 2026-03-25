@@ -32,7 +32,7 @@ class StreamGuardModel(nn.Module):
         
         self.head_r = SafetyHead(hidden_size, num_classes)
         
-        self.loss = nn.CrossEntropyLoss(ignore_index=-100)
+        self.loss = nn.CrossEntropyLoss(reduction='none')
 
     def forward(self, input_ids, attention_mask, labels_r=None):
         
@@ -54,7 +54,11 @@ class StreamGuardModel(nn.Module):
         if labels_r is not None:
             flat_logits_r = logits_r.view(-1, logits_r.size(-1))
             flat_labels_r = labels_r.view(-1)
-            loss = self.loss(flat_logits_r, flat_labels_r)
+            flat_attention_mask = attention_mask.view(-1)
+            # Compute loss for all tokens, then mask
+            loss_per_token = self.loss(flat_logits_r, flat_labels_r)
+            # Only apply loss on non-padding tokens (where attention_mask == 1)
+            loss = (loss_per_token * flat_attention_mask).sum() / flat_attention_mask.sum()
 
         return logits_r, loss
 
@@ -76,6 +80,7 @@ class Collator:
             prompt = item['user_query']
             response = item['assistant_response']
             label_global = LABEL_MAP.get(item.get('safety_label', 'Safe'), 0)
+            
             unsafe_token_idx = item.get('unsafe_token_index', -1)
 
             user_part = f"User: {prompt}\nAssistant:"
@@ -94,27 +99,36 @@ class Collator:
             len_prompt_tokens = len(self.tokenizer(user_part, add_special_tokens=False).input_ids)
             sep_index = len_prompt_tokens - 1
 
-            labels_r_tensor = torch.full_like(input_ids, -100)
+            labels_r_tensor = torch.full_like(input_ids, 0)  # Default to Safe (0)
             seq_len = int(mask.sum())
             start_gen = sep_index + 1
 
+            # Labelize all response tokens
             if label_global == 0:
+                # All response tokens are Safe
                 labels_r_tensor[start_gen : seq_len] = 0
             else:
+                # Some tokens are Unsafe
                 if unsafe_token_idx <= 0:
-                    # boundary not found (-1) or first token is unsafe (0): full response is unsafe
-                    labels_r_tensor[start_gen : seq_len] = label_global
+                    # boundary not found or first token is unsafe: full response is unsafe
+                    labels_r_tensor[start_gen : seq_len] = 1
                 else:
+                    # Tokens before boundary are safe, after boundary are unsafe
                     boundary_token_idx = start_gen + unsafe_token_idx
                     if boundary_token_idx < seq_len:
                         labels_r_tensor[start_gen : boundary_token_idx] = 0
-                        labels_r_tensor[boundary_token_idx : seq_len] = label_global
+                        labels_r_tensor[boundary_token_idx : seq_len] = 1
                     else:
+                        # Boundary is beyond sequence: all response tokens are safe
                         labels_r_tensor[start_gen : seq_len] = 0
+            
+            # Ignore prompt tokens by setting them to padding label (0 is fine since attention_mask will ignore)
+            # Actually keep all tokens, attention_mask will handle the masking
 
             input_ids_list.append(input_ids)
             attention_mask_list.append(mask)
             labels_r_list.append(labels_r_tensor)
+            print(f"label_r: {labels_r_list}")
 
         return {
             "input_ids": torch.stack(input_ids_list),
