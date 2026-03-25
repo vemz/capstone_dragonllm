@@ -4,20 +4,20 @@ import os
 from typing import Any, Dict, List, Tuple
 
 import torch
+from torch.utils.data import DataLoader
 from datasets import Dataset, DatasetDict, load_dataset
 from sklearn.metrics import confusion_matrix
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from model import SafetyHead
 
-
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_MODEL_NAME = "Qwen/Qwen3-4B-Base"
 DEFAULT_HEAD_PATH = os.path.join(SCRIPT_DIR, "head_r3.pth")
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
+print(f"{DEVICE}")
 DTYPE = torch.bfloat16 if DEVICE.type == "cuda" else torch.float16 if DEVICE.type == "mps" else torch.float32
-
 
 def normalize_label(value: Any) -> int:
     if isinstance(value, str):
@@ -27,7 +27,6 @@ def normalize_label(value: Any) -> int:
     if isinstance(value, (int, float)):
         return 1 if int(value) == 1 else 0
     return 0
-
 
 def parse_unsafe_start_index(value: Any) -> int:
     if value is None:
@@ -48,20 +47,15 @@ def parse_unsafe_start_index(value: Any) -> int:
         return int(value)
     return -1
 
-
 def get_messages(item: Dict[str, Any]) -> List[Dict[str, Any]]:
-    messages_value = item.get("message")
-    if not isinstance(messages_value, list) or len(messages_value) == 0:
-        messages_value = item.get("messages", [])
+    messages_value = item.get("message") or item.get("messages", [])
     if not isinstance(messages_value, list):
         return []
     return [m for m in messages_value if isinstance(m, dict)]
 
-
 def split_prompt_and_assistant(messages: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], str]:
     if not messages:
         return [], ""
-
     assistant_idx = -1
     assistant_content = ""
     for i, msg in enumerate(messages):
@@ -70,58 +64,41 @@ def split_prompt_and_assistant(messages: List[Dict[str, Any]]) -> Tuple[List[Dic
             assistant_idx = i
             assistant_content = str(msg.get("content", ""))
             break
-
     if assistant_idx < 0:
         return messages, ""
     return messages[:assistant_idx], assistant_content
 
-
-def build_input_ids_from_messages(
-    tokenizer,
-    messages: List[Dict[str, Any]],
-    max_length: int,
-) -> Tuple[List[int], int]:
+def build_input_ids_from_messages(tokenizer, messages: List[Dict[str, Any]], max_length: int) -> Tuple[List[int], int]:
     prompt_messages, _ = split_prompt_and_assistant(messages)
     try:
         full_ids = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=False)
         prompt_ids = tokenizer.apply_chat_template(prompt_messages, tokenize=True, add_generation_prompt=True)
     except Exception:
-        prompt_text = ""
-        assistant_text = ""
-        for m in messages:
-            role = str(m.get("role", "")).strip().lower()
-            if role == "user":
-                prompt_text = str(m.get("content", ""))
-            elif role == "assistant":
-                assistant_text = str(m.get("content", ""))
+        prompt_text = next((str(m.get("content", "")) for m in messages if str(m.get("role", "")).strip().lower() == "user"), "")
+        assistant_text = next((str(m.get("content", "")) for m in messages if str(m.get("role", "")).strip().lower() == "assistant"), "")
         raw = f"User: {prompt_text}\nAssistant: {assistant_text}"
         full_ids = tokenizer(raw, add_special_tokens=False).input_ids
-        prompt_only = f"User: {prompt_text}\nAssistant:"
-        prompt_ids = tokenizer(prompt_only, add_special_tokens=False).input_ids
+        prompt_ids = tokenizer(f"User: {prompt_text}\nAssistant:", add_special_tokens=False).input_ids
 
-    if max_length is not None and max_length > 0 and len(full_ids) > max_length:
+    if max_length and max_length > 0 and len(full_ids) > max_length:
         full_ids = full_ids[:max_length]
 
     response_start = min(len(prompt_ids), len(full_ids))
     return full_ids, response_start
 
-
 def load_guardtest_split(dataset_name: str, split: str) -> Dataset:
     ds = load_dataset(dataset_name)
     if isinstance(ds, DatasetDict):
         if split not in ds:
-            available = ", ".join(ds.keys())
-            raise ValueError(f"Requested split '{split}' not found. Available splits: {available}")
+            raise ValueError(f"Split '{split}' introuvable. Disponibles: {', '.join(ds.keys())}")
         return ds[split]
-    if isinstance(ds, Dataset):
-        return ds
-    raise ValueError("Unexpected dataset format")
-
+    return ds
 
 def load_model(model_name: str, head_path: str):
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "right" 
 
     backbone = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=DTYPE)
     backbone.to(DEVICE)
@@ -135,172 +112,130 @@ def load_model(model_name: str, head_path: str):
 
     return tokenizer, backbone, head_r
 
+def collate_fn_builder(tokenizer, max_length):
+    def collate_fn(batch):
+        input_ids_list, attention_masks, response_starts, labels, gt_starts = [], [], [], [], []
+        
+        for item in batch:
+            messages = get_messages(item)
+            ids, resp_start = build_input_ids_from_messages(tokenizer, messages, max_length)
+            
+            input_ids_list.append(torch.tensor(ids, dtype=torch.long))
+            response_starts.append(resp_start)
+            labels.append(normalize_label(item.get("label", "Safe")))
+            gt_starts.append(parse_unsafe_start_index(item.get("unsafe_start_index", -1)))
 
-@torch.inference_mode()
-def predict_first_toxic_token(
-    backbone,
-    head_r,
-    input_ids_list: List[int],
-    response_start: int,
-) -> Dict[str, int]:
-    if not input_ids_list:
-        return {"pred_label": 0, "pred_unsafe_start": -1, "response_token_count": 0}
+        padded_inputs = torch.nn.utils.rnn.pad_sequence(input_ids_list, batch_first=True, padding_value=tokenizer.pad_token_id)
+        attention_mask = (padded_inputs != tokenizer.pad_token_id).long()
 
-    try:
-        cleaned_ids = [int(x) for x in input_ids_list]
-    except (ValueError, TypeError):
-        return {"pred_label": 0, "pred_unsafe_start": -1, "response_token_count": 0}
-
-    input_ids = torch.tensor([cleaned_ids], dtype=torch.long, device=DEVICE)
-    attention_mask = torch.ones_like(input_ids, device=DEVICE)
-
-    amp_ctx = torch.amp.autocast(DEVICE.type, dtype=DTYPE) if DEVICE.type != "cpu" else nullcontext()
-    with amp_ctx:
-        outputs = backbone(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            output_hidden_states=True,
-        )
-        h = outputs.hidden_states[-1]
-        logits = head_r(h)
-
-    preds = torch.argmax(logits, dim=-1)[0].detach().cpu()
-
-    start = max(0, min(int(response_start), int(preds.numel())))
-    resp_preds = preds[start:]
-
-    unsafe_positions = (resp_preds == 1).nonzero(as_tuple=True)[0]
-    pred_unsafe_start = unsafe_positions[0].item() if len(unsafe_positions) > 0 else -1
-    pred_label = 1 if pred_unsafe_start >= 0 else 0
-
-    return {
-        "pred_label": pred_label,
-        "pred_unsafe_start": pred_unsafe_start,
-        "response_token_count": int(resp_preds.numel()),
-    }
-
+        return {
+            "input_ids": padded_inputs,
+            "attention_mask": attention_mask,
+            "response_starts": response_starts,
+            "labels": labels,
+            "gt_starts": gt_starts
+        }
+    return collate_fn
 
 def run_eval(args):
     ds = load_guardtest_split(args.dataset, args.split)
     if args.limit is not None:
         ds = ds.select(range(min(args.limit, len(ds))))
 
-    print(f"Samples: {len(ds)} | split={args.split}")
-    print(f"Model: {args.model} | head: {args.head}")
-    print("Toxic start rule: first predicted unsafe token")
+    eval_boundary = (args.split == "response_loc")
 
     tokenizer, backbone, head_r = load_model(args.model, args.head)
+    
+    dataloader = DataLoader(
+        ds, 
+        batch_size=args.batch_size, 
+        collate_fn=collate_fn_builder(tokenizer, args.max_length)
+    )
 
-    y_true: List[int] = []
-    y_pred: List[int] = []
-
-    mae_true: List[int] = []
-    mae_pred: List[int] = []
+    y_true, y_pred = [], []
+    mae_true, mae_pred = [], []
     boundary_out_of_range = 0
+    safe_false_stop_positions = []
 
-    safe_false_stop_positions: List[int] = []
-    safe_total = 0
-    unsafe_total = 0
-    unsafe_stopped = 0
+    amp_ctx = torch.amp.autocast(DEVICE.type, dtype=DTYPE) if DEVICE.type != "cpu" else nullcontext()
 
-    used_dataset_input_ids = 0
-    used_retokenized = 0
+    with torch.inference_mode():
+        for step, batch in enumerate(dataloader):
+            input_ids = batch["input_ids"].to(DEVICE)
+            attention_mask = batch["attention_mask"].to(DEVICE)
+            
+            with amp_ctx:
+                outputs = backbone(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)
+                h = outputs.hidden_states[-1]
+                logits = head_r(h) # (batch_size, seq_len, 2)
+            
+            preds = torch.argmax(logits, dim=-1).cpu() # (batch_size, seq_len)
 
-    for idx, item in enumerate(ds):
-        label = normalize_label(item.get("label", "Safe"))
-        gt_start = parse_unsafe_start_index(item.get("unsafe_start_index", -1))
-        messages = get_messages(item)
+            for i in range(len(batch["labels"])):
+                label = batch["labels"][i]
+                gt_start = batch["gt_starts"][i]
+                resp_start = batch["response_starts"][i]
+                
+                actual_seq_len = attention_mask[i].sum().item()
+                
+                start_idx = min(resp_start, actual_seq_len)
+                resp_preds = preds[i, start_idx:actual_seq_len]
+                
+                unsafe_positions = (resp_preds == 1).nonzero(as_tuple=True)[0]
+                pred_unsafe_start = unsafe_positions[0].item() if len(unsafe_positions) > 0 else -1
+                pred_label = 1 if pred_unsafe_start >= 0 else 0
 
-        input_ids_list = item.get("input_ids")
-        if isinstance(input_ids_list, list) and len(input_ids_list) > 0:
-            _, response_start = build_input_ids_from_messages(tokenizer, messages, max_length=0)
-            used_dataset_input_ids += 1
-        else:
-            input_ids_list, response_start = build_input_ids_from_messages(tokenizer, messages, max_length=args.max_length)
-            used_retokenized += 1
+                y_true.append(label)
+                y_pred.append(pred_label)
 
-        pred = predict_first_toxic_token(
-            backbone,
-            head_r,
-            input_ids_list,
-            response_start,
-        )
+                if label == 0 and pred_unsafe_start >= 0:
+                    safe_false_stop_positions.append(pred_unsafe_start)
+                
+                elif label == 1 and eval_boundary:
+                    if gt_start >= 0:
+                        if gt_start < len(resp_preds):
+                            mae_true.append(gt_start)
+                            mae_pred.append(pred_unsafe_start if pred_unsafe_start >= 0 else len(resp_preds)) 
+                        else:
+                            boundary_out_of_range += 1
 
-        y_true.append(label)
-        y_pred.append(pred["pred_label"])
-
-        if label == 0:
-            safe_total += 1
-            if pred["pred_unsafe_start"] >= 0:
-                safe_false_stop_positions.append(pred["pred_unsafe_start"])
-        else:
-            unsafe_total += 1
-            if pred["pred_unsafe_start"] >= 0:
-                unsafe_stopped += 1
-
-            if gt_start >= 0:
-                if gt_start < pred["response_token_count"]:
-                    mae_true.append(gt_start)
-                    mae_pred.append(pred["pred_unsafe_start"])
-                else:
-                    boundary_out_of_range += 1
-
-        if (idx + 1) % 50 == 0 or (idx + 1) == len(ds):
-            print(f"  {idx + 1}/{len(ds)}", end="\r")
-    print()
+            if (step + 1) % max(1, (len(dataloader) // 10)) == 0:
+                print(f"  Progression: {step + 1}/{len(dataloader)} batchs", end="\r")
 
     cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
     tn, fp, fn, tp = int(cm[0, 0]), int(cm[0, 1]), int(cm[1, 0]), int(cm[1, 1])
     acc = (tn + tp) / max(1, len(y_true))
+    safe_total = tn + fp
+    unsafe_total = fn + tp
 
-    safe_pass_through = tn
-    safe_false_stops = fp
-    safe_false_stop_mean = float(sum(safe_false_stop_positions) / len(safe_false_stop_positions)) if safe_false_stop_positions else float("nan")
+    print(f"Accuracy: {acc:.4f}")
+    print(f"tn / fp: {tn:>9} | {fp:>11}")
+    print(f"fn / tp: {fn:>9} | {tp:>11}")
 
-    unsafe_stop_recall = tp / max(1, unsafe_total)
+    if safe_total > 0:
+        print(f"\n- Pass through: {tn}/{safe_total} ({tn/safe_total:.1%})")
+        print(f"-False positives : {fp}/{safe_total} ({fp/safe_total:.1%})")
+    if unsafe_total > 0:
+        print(f"- Recall: {tp}/{unsafe_total} ({tp/unsafe_total:.1%})")
 
-    if mae_true:
-        mae = float(torch.mean(torch.abs(torch.tensor(mae_true, dtype=torch.float32) - torch.tensor(mae_pred, dtype=torch.float32))).item())
-    else:
-        mae = float("nan")
-
-    print(f"Eval modes: dataset_input_ids={used_dataset_input_ids}, retokenized={used_retokenized}")
-    print(f"Accuracy (Safe vs Unsafe): {acc:.4f}")
-    print("Confusion matrix (rows=true, cols=pred)")
-    print("            Safe    Unsafe")
-    print(f"Safe    {tn:>8} {fp:>9}")
-    print(f"Unsafe  {fn:>8} {tp:>9}")
-
-    print("\nSafe behavior")
-    print(f"Safe total: {safe_total}")
-    print(f"Safe passed through to the end (pred Safe): {safe_pass_through}/{safe_total} ({safe_pass_through/max(1, safe_total):.1%})")
-    print(f"Unjustified early stop on Safe (pred Unsafe): {safe_false_stops}/{safe_total} ({safe_false_stops/max(1, safe_total):.1%})")
-    if safe_false_stops > 0:
-        print(f"Average unjustified stop token on Safe: {safe_false_stop_mean:.2f}")
-
-    print("\nUnsafe behavior")
-    print(f"Unsafe total: {unsafe_total}")
-    print(f"Unsafe correctly stopped (pred Unsafe): {tp}/{unsafe_total} ({unsafe_stop_recall:.1%})")
-    print(f"Unsafe missed (pred Safe): {fn}/{unsafe_total} ({fn/max(1, unsafe_total):.1%})")
-
-    print("\nBoundary quality on Unsafe")
-    print(f"MAE first toxic token: {mae:.2f} tokens")
-    print(f"Boundary samples used for MAE: {len(mae_true)}")
-    print(f"Boundary gt out-of-range after tokenization/truncation: {boundary_out_of_range}")
-
+    if eval_boundary:
+        if mae_true:
+            mae = sum(abs(t - p) for t, p in zip(mae_true, mae_pred)) / len(mae_true)
+            print(f"MAE on first unsafe token: {mae:.2f} tokens")
+            print(f"Valid samples used for MAE: {len(mae_true)}")
 
 def main():
     parser = argparse.ArgumentParser(description="Evaluate SafetyHead on Qwen3GuardTest")
     parser.add_argument("--dataset", default="Qwen/Qwen3GuardTest")
-    parser.add_argument("--split", default="thinking")
+    parser.add_argument("--split", default="thinking", choices=["thinking", "response_loc"])
     parser.add_argument("--model", default=DEFAULT_MODEL_NAME)
     parser.add_argument("--head", default=DEFAULT_HEAD_PATH)
     parser.add_argument("--max-length", type=int, default=2048)
     parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--batch-size", type=int, default=8)
     args = parser.parse_args()
 
     run_eval(args)
-
 
 if __name__ == "__main__":
     main()
