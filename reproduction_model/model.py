@@ -128,7 +128,6 @@ class Collator:
             input_ids_list.append(input_ids)
             attention_mask_list.append(mask)
             labels_r_list.append(labels_r_tensor)
-            print(f"label_r: {labels_r_list}")
 
         return {
             "input_ids": torch.stack(input_ids_list),
