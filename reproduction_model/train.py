@@ -35,6 +35,7 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    print(f"Tokenizer pad token: {tokenizer.pad_token} (id: {tokenizer.pad_token_id})")
 
     model = StreamGuardModel(MODEL_NAME)
     model.backbone.to(DTYPE)
