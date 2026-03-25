@@ -13,7 +13,7 @@ from model import SafetyHead
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_MODEL_NAME = "Qwen/Qwen3-4B-Base"
-DEFAULT_HEAD_PATH = os.path.join(SCRIPT_DIR, "head_r2.pth")
+DEFAULT_HEAD_PATH = os.path.join(SCRIPT_DIR, "head_r3.pth")
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
 DTYPE = torch.bfloat16 if DEVICE.type == "cuda" else torch.float16 if DEVICE.type == "mps" else torch.float32
@@ -146,7 +146,12 @@ def predict_first_toxic_token(
     if not input_ids_list:
         return {"pred_label": 0, "pred_unsafe_start": -1, "response_token_count": 0}
 
-    input_ids = torch.tensor([input_ids_list], dtype=torch.long, device=DEVICE)
+    try:
+        cleaned_ids = [int(x) for x in input_ids_list]
+    except (ValueError, TypeError):
+        return {"pred_label": 0, "pred_unsafe_start": -1, "response_token_count": 0}
+
+    input_ids = torch.tensor([cleaned_ids], dtype=torch.long, device=DEVICE)
     attention_mask = torch.ones_like(input_ids, device=DEVICE)
 
     amp_ctx = torch.amp.autocast(DEVICE.type, dtype=DTYPE) if DEVICE.type != "cpu" else nullcontext()
@@ -160,6 +165,7 @@ def predict_first_toxic_token(
         logits = head_r(h)
 
     preds = torch.argmax(logits, dim=-1)[0].detach().cpu()
+
     start = max(0, min(int(response_start), int(preds.numel())))
     resp_preds = preds[start:]
 

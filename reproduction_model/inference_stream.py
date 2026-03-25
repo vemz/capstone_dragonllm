@@ -5,11 +5,12 @@ import os
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_NAME = "Qwen/Qwen3-4B-Base"
-HEAD_PATH = os.path.join(SCRIPT_DIR, "head_r2.pth")
+HEAD_PATH = os.path.join(SCRIPT_DIR, "head_r3.pth")
 DTYPE = torch.bfloat16
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
 print(f"Using device: {DEVICE}")
 LABEL_NAMES = {0: "Safe", 1: "Unsafe"}
+UNSAFE_CONFIDENCE_THRESHOLD = 0.80
 
 
 def is_turn_marker_suffix(text):
@@ -39,7 +40,14 @@ def load_model():
     return tokenizer, backbone, head_r
 
 
-def stream_generate(tokenizer, backbone, head_r, user_query, max_new_tokens=256):
+def stream_generate(
+    tokenizer,
+    backbone,
+    head_r,
+    user_query,
+    max_new_tokens=256,
+    unsafe_confidence_threshold=UNSAFE_CONFIDENCE_THRESHOLD,
+):
     prompt_text = f"User: {user_query}\nAssistant:"
     input_ids = tokenizer(prompt_text, return_tensors="pt", add_special_tokens=False).input_ids.to(DEVICE)
 
@@ -76,6 +84,9 @@ def stream_generate(tokenizer, backbone, head_r, user_query, max_new_tokens=256)
         if is_turn_marker_suffix(candidate_text):
             break
 
+        prob_safe = torch.softmax(safety_logits, dim=-1)[0, 0].item()
+        prob_unsafe = torch.softmax(safety_logits, dim=-1)[0, 1].item()
+        should_block = prob_unsafe >= unsafe_confidence_threshold
         label = LABEL_NAMES[pred]
 
         color = "\033[92m" if pred == 0 else "\033[91m"
@@ -87,16 +98,18 @@ def stream_generate(tokenizer, backbone, head_r, user_query, max_new_tokens=256)
             "token": token_text,
             "label": label,
             "confidence": confidence,
-            "prob_safe": torch.softmax(safety_logits, dim=-1)[0, 0].item(),
-            "prob_unsafe": torch.softmax(safety_logits, dim=-1)[0, 1].item(),
+            "prob_safe": prob_safe,
+            "prob_unsafe": prob_unsafe,
         })
 
         if next_token_id.item() == tokenizer.eos_token_id:
             break
 
-        if pred == 1:
-            print(f"\n\n{color}[UNSAFE DETECTED at token {i}: \"{token_text}\" "
-                  f"(confidence: {confidence:.2%})]{reset}")
+        if should_block:
+            print(
+                f"\n\n{color}[UNSAFE DETECTED at token {i}: \"{token_text}\" "
+                f"(prob_unsafe: {prob_unsafe:.2%}, threshold: {unsafe_confidence_threshold:.0%})]{reset}"
+            )
             break
 
         generated_token_ids.append(int(next_token_id.item()))
@@ -109,6 +122,7 @@ def stream_generate(tokenizer, backbone, head_r, user_query, max_new_tokens=256)
 def main():
     print("Loading model...")
     tokenizer, backbone, head_r = load_model()
+    print(f"Unsafe confidence threshold: {UNSAFE_CONFIDENCE_THRESHOLD:.0%}")
     print("Model loaded. Interactive mode ready.\n")
 
     while True:
