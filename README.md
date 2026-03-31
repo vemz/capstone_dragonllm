@@ -1,4 +1,4 @@
-# Qwen3Guard Reproduction
+# Capstone project with DragonLLM: LLM toxicity classifier
 
 A reproduction of the toxic content classifier model presented in the **Qwen3Guard technical report** ([arXiv:2510.14276](https://arxiv.org/abs/2510.14276)), developed in collaboration with DragonLLM.
 
